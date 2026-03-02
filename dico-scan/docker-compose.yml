@@ -1,0 +1,45 @@
+version: '3.9'
+
+services:
+  # ===== PostgreSQL Database (mirrors Cloud SQL config) =====
+  db:
+    image: postgres:16-alpine
+    container_name: dico-scan-db
+    environment:
+      POSTGRES_DB: dicoscan
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d dicoscan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===== DICO Scan Spring Boot Application =====
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dico-scan-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Override application.yaml with local Docker values
+      DB_URL: jdbc:postgresql://db:5432/dicoscan
+      DB_USER: postgres
+      DB_PASS: postgres
+      HIBERNATE_STATS: "true"         # Enable N+1 detection in development
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    restart: on-failure
+
+volumes:
+  db_data:
+    driver: local

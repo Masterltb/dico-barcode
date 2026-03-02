@@ -1,0 +1,142 @@
+openapi: 3.0.3
+info:
+  title: DICO Scan API Production V2
+  description: "API Core phục vụ Mobile App quét mã vạch, phân tích thực phẩm bằng Deterministic Scoring Engine và Gemini 1.5 Flash AI."
+  version: 2.0.0
+servers:
+  - url: https://api.dico-scan.com
+    description: Production Server
+
+paths:
+  /v1/products/{barcode}:
+    get:
+      summary: Retrieves deterministic score, green/yellow/red color, and AI summary (Optional).
+      description: API chính chịu tải cao nhất từ Mobile App. Có cache.
+      parameters:
+        - name: barcode
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9]{8,14}$'
+        - name: X-Trace-Id
+          in: header
+          required: false
+          schema:
+            type: string
+            description: Phục vụ tracing log Datadog/ELK
+      responses:
+        '200':
+          description: OK - Sản phẩm được lấy và chấm điểm thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductEvaluationResponse'
+        '404':
+          description: Not Found - Không tìm thấy barcode này trên toàn bộ Database lẫn OpenFoodFacts.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+  /v1/users/me/preferences:
+    put:
+      summary: Cập nhật thông số dị ứng User (Idempotent).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allergies:
+                  type: array
+                  items:
+                    type: string
+                diet:
+                  type: string
+                  example: "Keto"
+      responses:
+        '200':
+          description: Cập nhật thành công.
+
+  /v1/contribute:
+    post:
+      summary: Upload nhãn mác sản phẩm mới khi bị 404 (Content-Type multipart/form-data).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image:
+                  type: string
+                  format: binary
+                barcode:
+                  type: string
+      responses:
+        '202':
+          description: Accepted (Async xử lý sau).
+
+components:
+  schemas:
+    ProductEvaluationResponse:
+      type: object
+      required:
+        - barcode
+        - rating
+        - score
+        - confidence_score
+      properties:
+        barcode:
+          type: string
+          example: "8934567812"
+        name:
+          type: string
+        brand:
+          type: string
+        rating:
+          type: string
+          enum: [GREEN, YELLOW, RED, UNKNOWN]
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        confidence_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: "1.0 = Đầy đủ data thành phần + bảng thành phần. <1.0 = thiếu"
+        ai_summary:
+          type: string
+          maxLength: 300
+          description: "Tóm tắt từ AI. Có thể là NULL nếu AI call timeout/failed."
+          nullable: true
+        override_reasons:
+          type: array
+          items:
+            type: string
+          description: "Lý do bị ép thẻ RED nếu vi phạm dị ứng hoặc phụ gia cấm."
+
+    StandardError:
+      type: object
+      properties:
+        error_code:
+          type: string
+          example: "PRODUCT_NOT_FOUND"
+        message:
+          type: string
+        trace_id:
+          type: string
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
