@@ -10,31 +10,37 @@ import java.util.List;
  * defaults).
  */
 public record OffProductData(
-        String barcode,
-        String productName,
-        String brand,
-        String imageUrl,
+                String barcode,
+                String productName,
+                String brand,
+                String imageUrl,
 
-        /** Nutriscore grade: A/B/C/D/E or empty string if missing */
-        String nutriscoreGrade,
+                /** Nutriscore grade: A/B/C/D/E or empty string if missing */
+                String nutriscoreGrade,
 
-        /** NOVA group: 1/2/3/4 or null if missing */
-        Integer novaGroup,
+                /** NOVA group: 1/2/3/4 or null if missing */
+                Integer novaGroup,
 
-        /** List of additive tags e.g. ["en:e102", "en:e300"] */
-        List<String> additivesTags,
+                /** List of additive tags e.g. ["en:e102", "en:e300"] */
+                List<String> additivesTags,
 
-        /** Raw ingredient text — sent to AI. May be empty. */
-        String ingredientsText,
+                /** Raw ingredient text — sent to AI. May be empty. */
+                String ingredientsText,
 
-        /** Allergen hierarchy from OFF e.g. ["en:gluten", "en:peanuts"] */
-        List<String> allergensHierarchy,
+                /** Allergen hierarchy from OFF e.g. ["en:gluten", "en:peanuts"] */
+                List<String> allergensHierarchy,
 
-        /** Nutritional values per 100g */
-        double energyKcal100g,
-        double sugars100g,
-        double salt100g,
+                /** Nutritional values per 100g */
+                double energyKcal100g,
+                double sugars100g,
+                double salt100g,
 
-        /** True if all critical fields are present (affects confidenceScore) */
-        boolean hasCompleteData) {
+                /** True if all critical fields are present (affects confidenceScore) */
+                boolean hasCompleteData,
+
+                /**
+                 * Category tags from OFF e.g. ["en:chocolates", "en:snacks"] — used for
+                 * ProductCategoryDetector
+                 */
+                List<String> categoriesTags) {
 }

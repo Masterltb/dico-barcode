@@ -12,10 +12,17 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * REST Controller for product barcode evaluation.
- * Maps to OpenAPI spec: GET /v1/products/{barcode}
+ * Supports both anonymous (FREE tier) and authenticated (PREMIUM tier) users.
+ *
+ * Anonymous: No X-User-Id header → FREE tier, no personal allergy gating.
+ * Authenticated: X-User-Id header → subscription tier loaded from DB.
+ *
+ * MVP: userId passed as request header X-User-Id.
+ * Phase 2: Extract userId from JWT claim.
  */
 @Slf4j
 @Validated
@@ -27,33 +34,23 @@ public class ProductController {
 
     private final ProductApplicationService productService;
 
-    /**
-     * Evaluates a product by barcode.
-     * Returns GREEN/YELLOW/RED safety rating with deterministic score and optional
-     * AI summary.
-     *
-     * The barcode header X-Trace-Id is forwarded to GlobalExceptionHandler for log
-     * correlation.
-     * User preferences header X-User-Preferences is a JSON-encoded map (for MVP
-     * without auth).
-     */
     @GetMapping("/{barcode}")
-    @Operation(summary = "Evaluate product safety by barcode", description = "Fetches product from DB cache or OpenFoodFacts, calculates deterministic safety score, returns rating with optional AI summary.")
+    @Operation(summary = "Evaluate product safety by barcode", description = "Multi-category evaluation (FOOD/TOY/BEAUTY/FASHION/GENERAL). Tier gating: FREE gets generic summary, PREMIUM gets personalized allergen alerts.")
     public ResponseEntity<ProductEvaluationResponse> evaluateProduct(
             @PathVariable @Pattern(regexp = "^[0-9]{8,14}$", message = "Barcode must be 8-14 digits") String barcode,
-
-            // MVP: User allergies passed as request param JSON until auth is implemented
-            // Phase 2: Replace with JWT-derived user preferences
+            @RequestHeader(value = "X-User-Id", required = false) UUID userId,
             @RequestParam(value = "allergies", required = false) String allergiesParam) {
-        log.info("Product evaluation request: barcode={}", barcode);
 
-        // Parse allergies query param (comma-separated, e.g. ?allergies=peanuts,gluten)
+        log.info("Product evaluation request: barcode={} userId={}", barcode, userId);
+
+        // Parse query param allergies (used only for PREMIUM users without saved
+        // preferences)
         Map<String, Object> preferences = Map.of(
                 "allergies", allergiesParam != null
                         ? java.util.Arrays.asList(allergiesParam.split(","))
                         : java.util.Collections.emptyList());
 
-        ProductEvaluationResponse response = productService.evaluateProduct(barcode, preferences);
+        ProductEvaluationResponse response = productService.evaluateProduct(barcode, preferences, userId);
         return ResponseEntity.ok(response);
     }
 }

@@ -189,6 +189,6 @@ class ScoringEngineServiceTest {
                 "1234567890123", "Test Product", "Test Brand", "",
                 nutriscoreGrade, novaGroup, additivesTags, ingredientsText, allergensHierarchy,
                 200.0, 5.0, 1.0,
-                hasCompleteData);
+                hasCompleteData, Collections.emptyList());
     }
 }

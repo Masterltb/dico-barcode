@@ -48,6 +48,7 @@ public class OffResponseParser {
         // Additives — list of "en:e102" style tags
         List<String> additivesTags = getStringList(rawProduct, "additives_tags");
         List<String> allergensHierarchy = getStringList(rawProduct, "allergens_hierarchy");
+        List<String> categoriesTags = getStringList(rawProduct, "categories_tags");
 
         // Nutriments sub-object
         Object nutrimentObj = rawProduct.get("nutriments");
@@ -68,7 +69,7 @@ public class OffResponseParser {
                 nutriscoreGrade, novaGroup,
                 additivesTags, ingredients, allergensHierarchy,
                 energy, sugars, salt,
-                hasCompleteData);
+                hasCompleteData, categoriesTags);
     }
 
     // ===== Safe extraction helpers =====
@@ -123,6 +124,6 @@ public class OffResponseParser {
                 Collections.emptyList(), "",
                 Collections.emptyList(),
                 0, 0, 0,
-                false);
+                false, Collections.emptyList());
     }
 }

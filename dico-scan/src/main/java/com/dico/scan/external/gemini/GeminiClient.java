@@ -1,5 +1,6 @@
 package com.dico.scan.external.gemini;
 
+import com.dico.scan.enums.ProductCategory;
 import com.dico.scan.external.off.OffProductData;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -14,16 +15,17 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * HTTP client for Gemini 1.5 Flash API.
+ * HTTP client for Gemini API (multi-category prompt routing).
  *
  * CONTRACT (Spec 04):
  * - AI can ONLY produce text summaries (<50 words in Vietnamese).
  * - AI CANNOT produce rating colors or scores.
- * - Hard timeout: 2000ms. On any failure → return fallback AiAnalysisResult.
- * - Input truncated at 1500 chars for ingredients_text to control token cost.
+ * - Hard timeout: 12s. On any failure → return FALLBACK.
+ * - Prompt template is selected based on ProductCategory.
+ * - For FREE users userAllergies/profileData are passed as empty → generic
+ * summary.
  *
- * GUARDRAIL (Rule 6): No @Transactional. Called from ProductApplicationService
- * AFTER the DB transaction is committed.
+ * GUARDRAIL (Rule 6): No @Transactional. Called AFTER DB transaction committed.
  */
 @Slf4j
 @Component
@@ -35,7 +37,7 @@ public class GeminiClient {
     @Value("${app.ai.gemini-key:}")
     private String geminiApiKey;
 
-    @Value("${app.ai.gemini-url:https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent}")
+    @Value("${app.ai.gemini-url:https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent}")
     private String geminiUrl;
 
     @Value("${app.ai.max-ingredients-length:1500}")
@@ -47,20 +49,21 @@ public class GeminiClient {
             Collections.emptyList());
 
     /**
-     * Calls Gemini 1.5 Flash to generate a Vietnamese safety summary.
+     * Calls Gemini to generate a Vietnamese safety summary.
+     * Routes to the correct prompt template based on product category.
      * Returns FALLBACK on any error (timeout, JSON parse failure, HTTP error).
      *
      * @param productData   Normalized OFF product data
-     * @param userAllergies User's allergy list (included in prompt for
-     *                      personalization)
+     * @param category      Detected product category
+     * @param userAllergies User's allergy list. Empty list = FREE tier (generic)
      */
-    public AiAnalysisResult analyze(OffProductData productData, List<String> userAllergies) {
+    public AiAnalysisResult analyze(OffProductData productData, ProductCategory category, List<String> userAllergies) {
         if (geminiApiKey == null || geminiApiKey.isBlank()) {
             log.warn("Gemini API key not configured. Returning fallback.");
             return FALLBACK;
         }
         try {
-            String prompt = buildPrompt(productData, userAllergies);
+            String prompt = buildPrompt(productData, category, userAllergies);
             String responseBody = callGeminiApi(prompt);
             return parseResponse(responseBody);
         } catch (Exception ex) {
@@ -69,13 +72,18 @@ public class GeminiClient {
         }
     }
 
-    private String buildPrompt(OffProductData data, List<String> allergies) {
-        // Truncate ingredients to control token usage (Spec 04, Section 5)
-        String ingredients = data.ingredientsText();
-        if (ingredients.length() > maxIngredientsLength) {
-            ingredients = ingredients.substring(0, maxIngredientsLength) + "...";
-        }
+    private String buildPrompt(OffProductData data, ProductCategory category, List<String> allergies) {
+        return switch (category) {
+            case FOOD -> buildFoodPrompt(data, allergies);
+            case TOY -> buildToyPrompt(data);
+            case BEAUTY -> buildBeautyPrompt(data);
+            case FASHION -> buildFashionPrompt(data);
+            case GENERAL -> buildGeneralPrompt(data);
+        };
+    }
 
+    private String buildFoodPrompt(OffProductData data, List<String> allergies) {
+        String ingredients = truncate(data.ingredientsText());
         return String.format("""
                 Bạn là chuyên gia dinh dưỡng lâm sàng API (Không phải là chatbot).
                 Nhiệm vụ: Phân tích thành phần thực phẩm và tóm tắt rủi ro sức khỏe bằng tiếng Việt ngắn gọn (< 50 từ).
@@ -101,11 +109,103 @@ public class GeminiClient {
                 ingredients, allergies.toString());
     }
 
+    private String buildToyPrompt(OffProductData data) {
+        String ingredients = truncate(data.ingredientsText());
+        return String.format(
+                """
+                        Bạn là chuyên gia an toàn sản phẩm trẻ em (API, không phải chatbot).
+                        Nhiệm vụ: Phân tích thông tin đồ chơi/sản phẩm trẻ em và tóm tắt cảnh báo an toàn bằng tiếng Việt (< 50 từ).
+
+                        Đầu vào:
+                        - product_name: %s
+                        - product_ingredients_materials: "%s"
+
+                        Ràng buộc bắt buộc:
+                        1. KHÔNG thêm bất kỳ text nào ngoài JSON. KHÔNG dùng ```json wrappers.
+                        2. ai_summary: Đề cập giới hạn tuổi (nếu biết), nguy cơ nuốt phải chi tiết nhỏ, vật liệu.
+                        3. risk_ingredients: Liệt kê vật liệu/hóa chất đáng lo ngại.
+                        4. detected_allergies: Để rỗng.
+
+                        Trả về JSON theo đúng schema này:
+                        {"ai_summary":"...","detected_allergies":[],"risk_ingredients":[]}
+                        """,
+                data.productName(), ingredients);
+    }
+
+    private String buildBeautyPrompt(OffProductData data) {
+        String ingredients = truncate(data.ingredientsText());
+        return String.format(
+                """
+                        Bạn là chuyên gia an toàn mỹ phẩm và thành phần làm đẹp (API, không phải chatbot).
+                        Nhiệm vụ: Phân tích thành phần mỹ phẩm, phát hiện các chất gây kích ứng, trả lời bằng tiếng Việt (< 50 từ).
+
+                        Đầu vào:
+                        - product_name: %s
+                        - ingredients_inci: "%s"
+
+                        Ràng buộc:
+                        1. KHÔNG thêm bất kỳ text nào ngoài JSON. KHÔNG dùng ```json wrappers.
+                        2. ai_summary: Cảnh báo paraben, sulfate (SLS/SLES), formaldehyde, hương liệu tổng hợp, alcohol nếu có.
+                        3. risk_ingredients: Liệt kê các thành phần được xác định là đáng lo ngại.
+
+                        Trả về JSON theo đúng schema này:
+                        {"ai_summary":"...","detected_allergies":[],"risk_ingredients":[]}
+                        """,
+                data.productName(), ingredients);
+    }
+
+    private String buildFashionPrompt(OffProductData data) {
+        String ingredients = truncate(data.ingredientsText());
+        return String.format(
+                """
+                        Bạn là chuyên gia an toàn hàng dệt may và thời trang (API, không phải chatbot).
+                        Nhiệm vụ: Phân tích thành phần vải/chất liệu, phát hiện hóa chất nhuộm hoặc nguy cơ dị ứng, bằng tiếng Việt (< 50 từ).
+
+                        Đầu vào:
+                        - product_name: %s
+                        - materials_composition: "%s"
+
+                        Ràng buộc:
+                        1. KHÔNG thêm bất kỳ text nào ngoài JSON. KHÔNG dùng ```json wrappers.
+                        2. ai_summary: Đề cập thành phần vải, hóa chất nhuộm potential (azo dye), phù hợp da nhạy cảm không.
+                        3. risk_ingredients: Liệt kê vật liệu hoặc hóa chất đáng lo ngại.
+
+                        Trả về JSON theo đúng schema này:
+                        {"ai_summary":"...","detected_allergies":[],"risk_ingredients":[]}
+                        """,
+                data.productName(), ingredients);
+    }
+
+    private String buildGeneralPrompt(OffProductData data) {
+        String ingredients = truncate(data.ingredientsText());
+        return String.format("""
+                Bạn là chuyên gia phân tích sản phẩm tiêu dùng (API, không phải chatbot).
+                Nhiệm vụ: Tóm tắt thông tin sản phẩm và cảnh báo chung bằng tiếng Việt (< 50 từ).
+
+                Đầu vào:
+                - product_name: %s
+                - product_info: "%s"
+
+                Ràng buộc:
+                1. KHÔNG thêm bất kỳ text nào ngoài JSON. KHÔNG dùng ```json wrappers.
+                2. Nếu không đủ thông tin: trả summary "Không đủ thông tin để phân tích."
+
+                Trả về JSON theo đúng schema này:
+                {"ai_summary":"...","detected_allergies":[],"risk_ingredients":[]}
+                """,
+                data.productName(), ingredients);
+    }
+
+    private String truncate(String text) {
+        if (text == null)
+            return "";
+        return text.length() > maxIngredientsLength
+                ? text.substring(0, maxIngredientsLength) + "..."
+                : text;
+    }
+
     @SuppressWarnings("unchecked")
     private String callGeminiApi(String prompt) {
-        // Use a dedicated RestTemplate with 2s timeout (created via @Bean in
-        // RestClientConfig Phase 2)
-        // For MVP: create inline with RestTemplate + SimpleClientHttpRequestFactory
         org.springframework.http.client.SimpleClientHttpRequestFactory factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
         factory.setReadTimeout(12000);
@@ -122,7 +222,6 @@ public class GeminiClient {
         ResponseEntity<Map<String, Object>> response = restTemplate.postForEntity(
                 urlWithKey, new HttpEntity<>(requestBody, headers), (Class<Map<String, Object>>) (Class<?>) Map.class);
 
-        // Extract text from Gemini response structure
         List<Map<String, Object>> candidates = (List<Map<String, Object>>) response.getBody().get("candidates");
         Map<String, Object> content = (Map<String, Object>) candidates.get(0).get("content");
         List<Map<String, Object>> parts = (List<Map<String, Object>>) content.get("parts");
@@ -130,8 +229,6 @@ public class GeminiClient {
     }
 
     private AiAnalysisResult parseResponse(String rawText) throws Exception {
-        // Strip whitespace. If AI added ```json ``` wrappers despite instruction, clean
-        // them.
         String cleaned = rawText.trim()
                 .replaceAll("^```json\\s*", "")
                 .replaceAll("\\s*```$", "");

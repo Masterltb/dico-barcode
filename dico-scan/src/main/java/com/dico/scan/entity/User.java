@@ -7,6 +7,9 @@ import lombok.Setter;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
+import com.dico.scan.enums.SubscriptionTier;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.UUID;
@@ -47,6 +50,22 @@ public class User {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "preferences", columnDefinition = "jsonb")
     private Map<String, Object> preferences;
+
+    /**
+     * Subscription tier. FREE users get generic scans.
+     * PREMIUM users get personalized allergy/profile-based analysis.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "subscription_tier", nullable = false, length = 20)
+    private SubscriptionTier subscriptionTier = SubscriptionTier.FREE;
+
+    /**
+     * Extended personal profile for Premium users.
+     * Schema: {"children_ages": [4, 7], "skin_type": "sensitive"}
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "profile_data", columnDefinition = "jsonb")
+    private Map<String, Object> profileData;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;

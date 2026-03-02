@@ -1,6 +1,7 @@
 package com.dico.scan.service;
 
 import com.dico.scan.entity.Product;
+import com.dico.scan.enums.ProductCategory;
 import com.dico.scan.external.off.OffProductData;
 import com.dico.scan.repository.ProductRepository;
 import com.dico.scan.service.scoring.ScoringResult;
@@ -35,18 +36,19 @@ public class ProductPersistService {
      * that does not interfere with any calling transaction context.
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public Product saveProduct(String barcode, OffProductData offData, ScoringResult result) {
+    public Product saveProduct(String barcode, OffProductData offData, ScoringResult result, ProductCategory category) {
         Product product = productRepository.findById(barcode).orElse(new Product());
 
         product.setBarcode(barcode);
         product.setName(offData.productName());
         product.setBrand(offData.brand());
         product.setImageUrl(offData.imageUrl());
-        product.setOffPayload(offData); // Store normalized OFF data as JSONB
+        product.setOffPayload(offData);
         product.setDeterminScore(result.score() != null ? result.score().shortValue() : null);
         product.setRatingColor(result.ratingColor().name());
         product.setConfidenceScore(result.confidenceScore());
-        product.setAiSummaryCache(null); // Reset AI cache on re-score
+        product.setCategory(category.name());
+        product.setAiSummaryCache(null);
         product.setAiInputsHash(null);
 
         Product saved = productRepository.save(product);

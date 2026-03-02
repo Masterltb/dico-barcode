@@ -82,6 +82,13 @@ public class Product {
     @Column(name = "ai_inputs_hash", length = 64)
     private String aiInputsHash;
 
+    /**
+     * Detected product category (FOOD/TOY/BEAUTY/FASHION/GENERAL).
+     * Determines scoring logic and AI prompt template used.
+     */
+    @Column(name = "category", length = 30, nullable = false)
+    private String category = "FOOD";
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 

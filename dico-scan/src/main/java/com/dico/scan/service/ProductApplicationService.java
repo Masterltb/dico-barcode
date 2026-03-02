@@ -2,12 +2,16 @@ package com.dico.scan.service;
 
 import com.dico.scan.dto.response.ProductEvaluationResponse;
 import com.dico.scan.entity.Product;
+import com.dico.scan.entity.User;
+import com.dico.scan.enums.ProductCategory;
+import com.dico.scan.enums.SubscriptionTier;
 import com.dico.scan.exception.ProductNotFoundException;
 import com.dico.scan.external.gemini.AiAnalysisResult;
 import com.dico.scan.external.gemini.GeminiClient;
 import com.dico.scan.external.off.OffProductData;
 import com.dico.scan.external.off.OpenFoodFactsClient;
 import com.dico.scan.repository.ProductRepository;
+import com.dico.scan.repository.UserRepository;
 import com.dico.scan.service.scoring.ScoringEngineService;
 import com.dico.scan.service.scoring.ScoringResult;
 import lombok.RequiredArgsConstructor;
@@ -21,21 +25,24 @@ import java.time.OffsetDateTime;
 import java.util.*;
 
 /**
- * Main orchestrator for the barcode evaluation flow (Sprint 2 + Sprint 3
- * integrated).
+ * Main orchestrator for the barcode evaluation flow.
  *
- * THE 5-STEP PRODUCTION FLOW:
- * 1. DB Cache Check (fast path, closes connection immediately)
- * 2. OpenFoodFacts Fetch (network, NO open DB transaction)
- * 3. Deterministic Scoring (pure math, no I/O)
- * 4. Persist deterministic result (REQUIRES_NEW transaction, short-lived)
- * 5. AI Layer: SHA-256 cache check + Gemini (network, NO open DB transaction)
- * 6. Update AI summary in DB if needed (REQUIRES_NEW transaction, short-lived)
- * 7. Build and return response
+ * SUBSCRIPTION TIER GATING:
+ * - FREE: allergies cleared → no personal Override O2, generic AI summary
+ * - PREMIUM: full personal profile used in scoring and AI prompt
  *
- * GUARDRAIL (Rule 6): NO @Transactional here.
- * DB connections are held only during Steps 1, 4, and 6 — never during network
- * calls (2, 5).
+ * MULTI-CATEGORY FLOW:
+ * 1. DB Cache Check
+ * 2. OpenFoodFacts Fetch
+ * 3. Category Detection (ProductCategoryDetector)
+ * 4. Deterministic Scoring (category-aware)
+ * 5. Tier gating — clear personal data for FREE users
+ * 6. Persist scoring result
+ * 7. AI Layer (category-specific prompt)
+ * 8. Update AI in DB
+ * 9. Build response with category fields
+ *
+ * GUARDRAIL: NO @Transactional here. DB connections held only in persist steps.
  */
 @Slf4j
 @Service
@@ -43,10 +50,12 @@ import java.util.*;
 public class ProductApplicationService {
 
     private final ProductRepository productRepository;
+    private final UserRepository userRepository;
     private final OpenFoodFactsClient offClient;
     private final ScoringEngineService scoringEngine;
     private final ProductPersistService persistService;
     private final GeminiClient geminiClient;
+    private final ProductCategoryDetector categoryDetector;
 
     @Value("${app.product-cache.ttl-days:90}")
     private int cacheTtlDays;
@@ -55,50 +64,67 @@ public class ProductApplicationService {
     // MAIN ENTRY POINT
     // ======================================================
 
-    public ProductEvaluationResponse evaluateProduct(String barcode, Map<String, Object> preferences) {
-        List<String> userAllergies = extractAllergies(preferences);
+    public ProductEvaluationResponse evaluateProduct(String barcode, Map<String, Object> preferences, UUID userId) {
+        // Resolve subscription tier: anonymous / missing user → FREE
+        SubscriptionTier tier = SubscriptionTier.FREE;
+        if (userId != null) {
+            Optional<User> userOpt = userRepository.findById(userId);
+            if (userOpt.isPresent()) {
+                tier = userOpt.get().getSubscriptionTier();
+                // For PREMIUM: merge saved preferences with request preferences
+                if (tier == SubscriptionTier.PREMIUM && preferences == null) {
+                    preferences = userOpt.get().getPreferences();
+                }
+            }
+        }
+
+        // FREE tier: clear personal profile → generic scoring and AI
+        final List<String> userAllergies = (tier == SubscriptionTier.PREMIUM)
+                ? extractAllergies(preferences)
+                : Collections.emptyList();
+
+        log.debug("evaluateProduct barcode={} tier={} allergies={}", barcode, tier, userAllergies.size());
 
         // -------- Step 1: DB Cache Check --------
         Product cached = productRepository.findById(barcode).orElse(null);
         if (cached != null && isFresh(cached)) {
             log.debug("Cache HIT for barcode={}", barcode);
-            return toResponse(cached, Collections.emptyList());
+            return toResponse(cached, Collections.emptyList(), tier);
         }
         log.debug("Cache MISS for barcode={}", barcode);
 
-        // -------- Step 2: Fetch OpenFoodFacts (network - no DB transaction open)
-        // --------
+        // -------- Step 2: Fetch OpenFoodFacts --------
         OffProductData offData = offClient.fetchProduct(barcode)
                 .orElseThrow(() -> new ProductNotFoundException(barcode));
 
-        // -------- Step 3: Deterministic Scoring (pure math) --------
+        // -------- Step 3: Detect product category --------
+        ProductCategory category = categoryDetector.detect(offData.categoriesTags());
+        log.debug("Category detected: {} for barcode={}", category, barcode);
+
+        // -------- Step 4: Deterministic Scoring --------
         ScoringResult result = scoringEngine.calculate(offData, userAllergies);
 
-        // -------- Step 4: Persist scoring result (opens short REQUIRES_NEW
-        // transaction) --------
-        Product saved = persistService.saveProduct(barcode, offData, result);
+        // -------- Step 5: Persist scoring result --------
+        Product saved = persistService.saveProduct(barcode, offData, result, category);
 
-        // -------- Step 5: AI Layer (network - no DB transaction open) --------
-        String aiInputsHash = computeAiHash(offData, userAllergies);
+        // -------- Step 6: AI Layer --------
+        String aiInputsHash = computeAiHash(offData, userAllergies, category);
         String aiSummary = null;
 
-        // 5a: AI Cache check — if ingredients unchanged, reuse stored summary
         if (saved.getAiInputsHash() != null && saved.getAiInputsHash().equals(aiInputsHash)
-                && saved.getAiSummaryCache() != null && !saved.getAiSummaryCache().contains("Vui lòng thử lại sau")) {
+                && saved.getAiSummaryCache() != null
+                && !saved.getAiSummaryCache().contains("Vui lòng thử lại sau")) {
             log.debug("AI Cache HIT for barcode={}", barcode);
             aiSummary = saved.getAiSummaryCache();
         } else {
-            // 5b: AI Cache MISS — call Gemini (with internal 2s timeout + fallback)
-            AiAnalysisResult aiResult = geminiClient.analyze(offData, userAllergies);
+            AiAnalysisResult aiResult = geminiClient.analyze(offData, category, userAllergies);
             aiSummary = aiResult.aiSummary();
-
-            // -------- Step 6: Update AI summary in DB (REQUIRES_NEW transaction) --------
             persistService.updateAiSummary(barcode, aiSummary, aiInputsHash);
         }
 
         // -------- Step 7: Build final response --------
-        saved.setAiSummaryCache(aiSummary); // in-memory only, already persisted above
-        return toResponse(saved, result.overrideReasons());
+        saved.setAiSummaryCache(aiSummary);
+        return toResponse(saved, result.overrideReasons(), tier);
     }
 
     // ======================================================
@@ -113,14 +139,11 @@ public class ProductApplicationService {
         return product.getUpdatedAt().isAfter(OffsetDateTime.now().minusDays(cacheTtlDays));
     }
 
-    /**
-     * Computes SHA-256 of key AI input fields.
-     * If this hash matches what's stored in the DB, we skip calling Gemini.
-     */
-    private String computeAiHash(OffProductData data, List<String> allergies) {
+    private String computeAiHash(OffProductData data, List<String> allergies, ProductCategory category) {
         String input = data.ingredientsText()
                 + "|" + data.sugars100g()
                 + "|" + data.salt100g()
+                + "|" + category.name()
                 + "|" + String.join(",", allergies);
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -131,7 +154,7 @@ public class ProductApplicationService {
             return hex.toString();
         } catch (Exception ex) {
             log.error("SHA-256 hash failed", ex);
-            return UUID.randomUUID().toString(); // fallback — forces fresh AI call
+            return UUID.randomUUID().toString();
         }
     }
 
@@ -148,7 +171,37 @@ public class ProductApplicationService {
         return Collections.emptyList();
     }
 
-    private ProductEvaluationResponse toResponse(Product p, List<String> overrideReasons) {
+    private String buildCategoryWarning(String category, List<String> overrideReasons) {
+        return switch (category) {
+            case "TOY" -> "⚠️ Kiểm tra giới hạn tuổi và nguy cơ nuốt phải chi tiết nhỏ";
+            case "BEAUTY" -> overrideReasons != null && !overrideReasons.isEmpty()
+                    ? "⚠️ Phát hiện thành phần có thể gây kích ứng"
+                    : "✅ Không phát hiện thành phần đáng lo ngại";
+            case "FASHION" -> "ℹ️ Xem thành phần chất liệu để đánh giá phù hợp với da nhạy cảm";
+            case "FOOD" -> null; // Food uses overrideReasons directly
+            default -> null;
+        };
+    }
+
+    private ProductEvaluationResponse toResponse(Product p, List<String> overrideReasons, SubscriptionTier tier) {
+        // FREE users only see generic overrideReasons (additive-based), not personal
+        // allergy conflicts
+        List<String> filteredReasons = null;
+        if (overrideReasons != null && !overrideReasons.isEmpty()) {
+            if (tier == SubscriptionTier.FREE) {
+                // FREE: only show non-personal reasons (additive blacklist, not allergy
+                // conflicts)
+                List<String> genericOnly = overrideReasons.stream()
+                        .filter(r -> !r.startsWith("Allergy conflict"))
+                        .toList();
+                filteredReasons = genericOnly.isEmpty() ? null : genericOnly;
+            } else {
+                filteredReasons = overrideReasons;
+            }
+        }
+
+        String categoryWarning = buildCategoryWarning(p.getCategory(), filteredReasons);
+
         return new ProductEvaluationResponse(
                 p.getBarcode(),
                 p.getName(),
@@ -158,7 +211,11 @@ public class ProductApplicationService {
                 p.getDeterminScore() != null ? p.getDeterminScore().intValue() : null,
                 p.getConfidenceScore(),
                 p.getAiSummaryCache(),
-                overrideReasons == null || overrideReasons.isEmpty() ? null : overrideReasons,
-                p.getUpdatedAt());
+                filteredReasons,
+                p.getUpdatedAt(),
+                p.getCategory(),
+                categoryWarning,
+                null // riskFactors: populated in future AI-to-structured-data sprint
+        );
     }
 }

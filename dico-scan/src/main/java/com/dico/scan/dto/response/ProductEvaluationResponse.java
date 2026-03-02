@@ -11,28 +11,46 @@ import java.util.List;
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ProductEvaluationResponse(
-        String barcode,
-        String name,
-        String brand,
-        String imageUrl,
+                String barcode,
+                String name,
+                String brand,
+                String imageUrl,
 
-        /** GREEN / YELLOW / RED / UNKNOWN */
-        String rating,
+                /** GREEN / YELLOW / RED / UNKNOWN */
+                String rating,
 
-        /** 0-100. Null when rating = UNKNOWN */
-        Integer score,
+                /** 0-100. Null when rating = UNKNOWN */
+                Integer score,
 
-        /** 0.0-1.0. < 1.0 means OFF data was incomplete */
-        Float confidenceScore,
+                /** 0.0-1.0. < 1.0 means OFF data was incomplete */
+                Float confidenceScore,
 
-        /**
-         * AI-generated summary < 50 words. Null when AI timed out or cache miss +
-         * timeout
-         */
-        String aiSummary,
+                /**
+                 * AI-generated summary < 50 words. Null when AI timed out or cache miss +
+                 * timeout
+                 */
+                String aiSummary,
 
-        /** Reasons why rating was overridden (allergy conflict, banned additive) */
-        List<String> overrideReasons,
+                /** Reasons why rating was overridden (allergy conflict, banned additive) */
+                List<String> overrideReasons,
 
-        OffsetDateTime cachedAt) {
+                OffsetDateTime cachedAt,
+
+                /** Detected product category: FOOD / TOY / BEAUTY / FASHION / GENERAL */
+                String category,
+
+                /**
+                 * Category-specific warning message.
+                 * e.g. "Phù hợp cho trẻ từ 3 tuổi trở lên" (TOY)
+                 * or "Chứa thành phần có thể gây kích ứng da" (BEAUTY)
+                 */
+                String categoryWarning,
+
+                /**
+                 * List of detected risk factors specific to the product category.
+                 * e.g. ["Chứa Paraben", "Sodium Lauryl Sulfate"] for BEAUTY
+                 * e.g. ["Nguy cơ nghẹt thở - Chi tiết nhỏ"] for TOY
+                 * Null for FREE users when no risk factors are detected.
+                 */
+                List<String> riskFactors) {
 }
