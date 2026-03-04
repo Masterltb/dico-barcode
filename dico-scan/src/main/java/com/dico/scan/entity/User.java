@@ -38,6 +38,9 @@ public class User {
     @Column(name = "email", nullable = false, unique = true, length = 255)
     private String email;
 
+    @Column(name = "password_hash", length = 255)
+    private String passwordHash;
+
     @Column(name = "display_name", length = 100)
     private String displayName;
 
@@ -48,8 +51,8 @@ public class User {
      * checks.
      */
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "preferences", columnDefinition = "jsonb")
-    private Map<String, Object> preferences;
+    @Column(name = "preferences", columnDefinition = "jsonb", nullable = false)
+    private Map<String, Object> preferences = Map.of("allergies", java.util.List.of(), "diet", "");
 
     /**
      * Subscription tier. FREE users get generic scans.
@@ -65,7 +68,7 @@ public class User {
      */
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "profile_data", columnDefinition = "jsonb")
-    private Map<String, Object> profileData;
+    private Map<String, Object> profileData = new java.util.HashMap<>();
 
     /**
      * Full safety profile from questionnaire wizard.
@@ -73,7 +76,7 @@ public class User {
      */
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "safety_profile", columnDefinition = "jsonb")
-    private Map<String, Object> safetyProfile;
+    private Map<String, Object> safetyProfile = new java.util.HashMap<>();
 
     /** True after user completes the safety profile wizard. */
     @Column(name = "profile_completed", nullable = false)

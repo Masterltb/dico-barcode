@@ -21,12 +21,21 @@ export const apiClient = axios.create({
     },
 });
 
-// Request Interceptor: Attach X-User-Id header (MVP auth)
+// Request Interceptor: Attach JWT Bearer token (or fallback X-User-Id)
 apiClient.interceptors.request.use(async (config) => {
     try {
-        const userId = await AsyncStorage.getItem("userId");
-        if (userId) {
-            config.headers["X-User-Id"] = userId;
+        const raw = await AsyncStorage.getItem("@dico_auth");
+        if (raw) {
+            const auth = JSON.parse(raw);
+            if (auth.token) {
+                config.headers["Authorization"] = `Bearer ${auth.token}`;
+            }
+        } else {
+            // Fallback: legacy X-User-Id for dev/test
+            const userId = await AsyncStorage.getItem("userId");
+            if (userId) {
+                config.headers["X-User-Id"] = userId;
+            }
         }
     } catch {
         // AsyncStorage failure is non-blocking
