@@ -67,23 +67,31 @@ public class ProductApplicationService {
     public ProductEvaluationResponse evaluateProduct(String barcode, Map<String, Object> preferences, UUID userId) {
         // Resolve subscription tier: anonymous / missing user → FREE
         SubscriptionTier tier = SubscriptionTier.FREE;
+        Map<String, Object> safetyProfile = null;
+
         if (userId != null) {
             Optional<User> userOpt = userRepository.findById(userId);
             if (userOpt.isPresent()) {
-                tier = userOpt.get().getSubscriptionTier();
+                User user = userOpt.get();
+                tier = user.getSubscriptionTier();
                 // For PREMIUM: merge saved preferences with request preferences
                 if (tier == SubscriptionTier.PREMIUM && preferences == null) {
-                    preferences = userOpt.get().getPreferences();
+                    preferences = user.getPreferences();
+                }
+                // Load safety profile for PREMIUM users who completed the wizard
+                if (tier == SubscriptionTier.PREMIUM && user.isProfileCompleted()) {
+                    safetyProfile = user.getSafetyProfile();
                 }
             }
         }
 
         // FREE tier: clear personal profile → generic scoring and AI
         final List<String> userAllergies = (tier == SubscriptionTier.PREMIUM)
-                ? extractAllergies(preferences)
+                ? extractAllAllergies(preferences, safetyProfile)
                 : Collections.emptyList();
 
-        log.debug("evaluateProduct barcode={} tier={} allergies={}", barcode, tier, userAllergies.size());
+        log.debug("evaluateProduct barcode={} tier={} allergies={} hasProfile={}",
+                barcode, tier, userAllergies.size(), safetyProfile != null);
 
         // -------- Step 1: DB Cache Check --------
         Product cached = productRepository.findById(barcode).orElse(null);
@@ -107,7 +115,7 @@ public class ProductApplicationService {
         // -------- Step 5: Persist scoring result --------
         Product saved = persistService.saveProduct(barcode, offData, result, category);
 
-        // -------- Step 6: AI Layer --------
+        // -------- Step 6: AI Layer (with personalized context) --------
         String aiInputsHash = computeAiHash(offData, userAllergies, category);
         String aiSummary = null;
 
@@ -117,7 +125,7 @@ public class ProductApplicationService {
             log.debug("AI Cache HIT for barcode={}", barcode);
             aiSummary = saved.getAiSummaryCache();
         } else {
-            AiAnalysisResult aiResult = geminiClient.analyze(offData, category, userAllergies);
+            AiAnalysisResult aiResult = geminiClient.analyze(offData, category, userAllergies, safetyProfile);
             aiSummary = aiResult.aiSummary();
             persistService.updateAiSummary(barcode, aiSummary, aiInputsHash);
         }
@@ -158,17 +166,51 @@ public class ProductApplicationService {
         }
     }
 
-    private List<String> extractAllergies(Map<String, Object> preferences) {
-        if (preferences == null)
-            return Collections.emptyList();
-        Object allergies = preferences.get("allergies");
-        if (allergies instanceof List<?> list) {
-            return list.stream()
-                    .filter(e -> e instanceof String)
-                    .map(e -> ((String) e).toLowerCase())
-                    .toList();
+    @SuppressWarnings("unchecked")
+    private List<String> extractAllAllergies(Map<String, Object> preferences, Map<String, Object> safetyProfile) {
+        Set<String> combined = new java.util.LinkedHashSet<>();
+
+        // Legacy preferences (backward compat)
+        if (preferences != null) {
+            Object allergies = preferences.get("allergies");
+            if (allergies instanceof List<?> list) {
+                list.stream()
+                        .filter(e -> e instanceof String)
+                        .map(e -> ((String) e).toLowerCase().trim())
+                        .forEach(combined::add);
+            }
         }
-        return Collections.emptyList();
+
+        // Safety profile: food allergies
+        if (safetyProfile != null) {
+            Object food = safetyProfile.get("foodAllergies");
+            if (food instanceof List<?> list) {
+                list.stream().filter(e -> e instanceof String)
+                        .map(e -> ((String) e).toLowerCase().trim()).forEach(combined::add);
+            }
+            Object customFood = safetyProfile.get("customFoodAllergies");
+            if (customFood instanceof List<?> list) {
+                list.stream().filter(e -> e instanceof String)
+                        .map(e -> ((String) e).toLowerCase().trim()).forEach(combined::add);
+            }
+            // Also include child's allergies if present
+            Object childObj = safetyProfile.get("childProfile");
+            if (childObj instanceof Map<?, ?> cm) {
+                Map<String, Object> child = (Map<String, Object>) cm;
+                Object childAllergies = child.get("allergies");
+                if (childAllergies instanceof List<?> list) {
+                    list.stream().filter(e -> e instanceof String)
+                            .map(e -> ((String) e).toLowerCase().trim()).forEach(combined::add);
+                }
+                Object childCustom = child.get("customAllergies");
+                if (childCustom instanceof List<?> list) {
+                    list.stream().filter(e -> e instanceof String)
+                            .map(e -> ((String) e).toLowerCase().trim()).forEach(combined::add);
+                }
+            }
+        }
+
+        return new ArrayList<>(combined);
     }
 
     private String buildCategoryWarning(String category, List<String> overrideReasons) {

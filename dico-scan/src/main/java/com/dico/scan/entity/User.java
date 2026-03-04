@@ -67,6 +67,18 @@ public class User {
     @Column(name = "profile_data", columnDefinition = "jsonb")
     private Map<String, Object> profileData;
 
+    /**
+     * Full safety profile from questionnaire wizard.
+     * Contains targets, allergies, health conditions, cosmetic sensitivities, etc.
+     */
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "safety_profile", columnDefinition = "jsonb")
+    private Map<String, Object> safetyProfile;
+
+    /** True after user completes the safety profile wizard. */
+    @Column(name = "profile_completed", nullable = false)
+    private boolean profileCompleted = false;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
 

@@ -1,0 +1,37 @@
+{
+    "targets": [
+        "SELF",
+        "CHILD"
+    ],
+    "childProfile": {
+        "ageGroup": "Y1_3",
+        "allergies": [
+            "milk",
+            "egg"
+        ],
+        "customAllergies": [
+            "keo ong"
+        ],
+        "severityLevel": "SEVERE"
+    },
+    "foodAllergies": [
+        "peanut",
+        "shellfish"
+    ],
+    "customFoodAllergies": [
+        "cam quyt"
+    ],
+    "cosmeticSensitivities": [
+        "fragrance",
+        "paraben"
+    ],
+    "skinType": "SENSITIVE",
+    "healthConditions": [
+        "DIABETES"
+    ],
+    "dietaryPreferences": [
+        "HALAL"
+    ],
+    "alertLevel": "STRICT",
+    "allergySeverity": "SEVERE"
+}
