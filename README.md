@@ -28,10 +28,15 @@ CREATE DATABASE dicoscan;
 ```
 *(Lưu ý: Flyway Migration đã được cấu hình trong source code, nó sẽ tự động tạo các bảng ngay khi bạn chạy app lần đầu)*
 
-**Bước 2: Cấu hình biến môi trường (Environment Variables)**
-Hệ thống sử dụng các khóa bảo mật không commited lên mạng. Bắt buộc phải thêm các biến môi trường sau cho Hệ điều hành hoặc cấu hình IDE (IntelliJ/Eclipse) trước khi chạy:
-- `DB_PASS`: Mật khẩu tài khoản `postgres` của bạn trên máy lokal.
+**Bước 2: Cấu hình bí mật (.env)**
+Mở thư mục `dico-scan`, sao chép file `.env.example` thành `.env`:
+```powershell
+cp .env.example .env
+```
+Sau đó mở file `.env` và điền các thông tin của bạn vào:
+- `DB_PASS`: Mật khẩu PostgreSQL.
 - `GEMINI_API_KEY`: Mã API Key tải từ Google AI Studio.
+*(Lưu ý: File `.env` đã được cấu hình trong `.gitignore` để không bị lộ lên GitHub)*
 
 **Bước 3: Chạy ứng dụng**
 Mở terminal tại thư mục Backend và chạy lệnh:

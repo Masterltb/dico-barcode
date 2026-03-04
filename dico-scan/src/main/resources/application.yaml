@@ -67,8 +67,8 @@ app:
   ai:
     timeout-ms: 2000
     max-ingredients-length: 1500
-    gemini-key: "AIzaSyANuKeui0hunDELkU-kkd3Ue0tcjV5BQ14"
-    gemini-url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+    gemini-key: ${GEMINI_API_KEY}
+    gemini-url: ${GEMINI_MODEL_URL:https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent}
   product-cache:
     ttl-days: 90   # Products older than 90 days are considered stale
 
