@@ -8,6 +8,9 @@ import { TabNavigator } from "./TabNavigator";
 import ResultScreen from "@/screens/ResultScreen";
 import ContributeScreen from "@/screens/ContributeScreen";
 import AuthScreen from "@/screens/AuthScreen";
+import UpgradeScreen from "@/screens/UpgradeScreen";
+import CompareScreen from "@/screens/CompareScreen";
+import FavoritesScreen from "@/screens/FavoritesScreen";
 import WizardWelcomeScreen from "@/screens/wizard/WizardWelcomeScreen";
 import WizardTargetsScreen from "@/screens/wizard/WizardTargetsScreen";
 import WizardChildScreen from "@/screens/wizard/WizardChildScreen";
@@ -40,6 +43,9 @@ export type RootStackParamList = {
     Result: { barcode: string };
     Contribute: { barcode: string };
     SafetyWizard: undefined;
+    Upgrade: undefined;
+    Compare: { barcode1?: string };
+    Favorites: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -116,6 +122,21 @@ export function RootNavigator() {
                         <Stack.Screen
                             name="SafetyWizard"
                             component={SafetyWizardNavigator}
+                            options={{ presentation: "modal", animation: "slide_from_bottom" }}
+                        />
+                        <Stack.Screen
+                            name="Upgrade"
+                            component={UpgradeScreen}
+                            options={{ presentation: "modal", animation: "slide_from_bottom" }}
+                        />
+                        <Stack.Screen
+                            name="Compare"
+                            component={CompareScreen}
+                            options={{ presentation: "modal", animation: "slide_from_bottom" }}
+                        />
+                        <Stack.Screen
+                            name="Favorites"
+                            component={FavoritesScreen}
                             options={{ presentation: "modal", animation: "slide_from_bottom" }}
                         />
                     </>

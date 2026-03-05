@@ -15,14 +15,37 @@ export interface ProductEvaluationResponse {
     aiSummary: string | null;
     overrideReasons: string[] | null;
     cachedAt: string;
+    category: string | null;
+    categoryWarning: string | null;
+    riskFactors: string[] | null;
+    ingredientsText: string | null;
 }
 
 /** Mirrors: ScanHistoryItemResponse.java */
 export interface ScanHistoryItem {
+    scanId: string;
     barcode: string;
-    name: string | null;
     scannedAt: string;
     snapshotColor: RatingColor;
+    name?: string | null; // populated by mobile from product cache if available
+}
+
+/** Generic Page<T> response from Spring Data */
+export interface PageResponse<T> {
+    content: T[];
+    totalElements: number;
+    totalPages: number;
+    number: number; // current page (0-based)
+    size: number;
+}
+
+/** Mirrors: UserPreferencesResponse.java */
+export interface UserPreferencesResponse {
+    allergies: string[];
+    diet: string;
+    subscriptionTier: 'FREE' | 'PREMIUM';
+    profileCompleted: boolean;
+    safetyProfile?: SafetyProfileResponse;
 }
 
 /** Mirrors: StandardError.java */
@@ -36,6 +59,7 @@ export interface StandardError {
 export interface UpdatePreferencesRequest {
     allergies: string[];
     diet: string;
+    safetyProfile?: SafetyProfileRequest;
 }
 
 export const ALLERGEN_OPTIONS = [

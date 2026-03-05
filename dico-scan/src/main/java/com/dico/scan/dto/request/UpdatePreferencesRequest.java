@@ -10,16 +10,22 @@ import java.util.List;
  * Idempotent — sending the same data multiple times yields the same DB state.
  */
 public record UpdatePreferencesRequest(
-        /**
-         * List of allergy identifiers.
-         * Max 20 items to prevent payload abuse.
-         * Example values: "peanuts", "gluten", "dairy", "shellfish"
-         */
-        @NotNull @Size(max = 20) List<String> allergies,
+                /**
+                 * List of allergy identifiers.
+                 * Max 20 items to prevent payload abuse.
+                 * Example values: "peanuts", "gluten", "dairy", "shellfish"
+                 */
+                @NotNull @Size(max = 20) List<String> allergies,
 
-        /**
-         * Diet type tag.
-         * Example: "vegan", "vegetarian", "keto", "halal"
-         */
-        @Size(max = 50) String diet) {
+                /**
+                 * Diet type tag.
+                 * Example: "vegan", "vegetarian", "keto", "halal"
+                 */
+                @Size(max = 50) String diet,
+
+                /**
+                 * Full safety profile data from the wizard.
+                 * Optional.
+                 */
+                java.util.Map<String, Object> safetyProfile) {
 }

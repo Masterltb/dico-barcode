@@ -1,0 +1,261 @@
+name: DICO Scan — CI/CD Pipeline
+
+# ─────────────────────────────────────────────────────────────────────
+# TRIGGER STRATEGY:
+#   push → main        : CI (test + lint) + deploy backend
+#   push → tag v*.*.*  : CI + build APK + create GitHub Release
+#   pull_request → main: CI only (no deploy, no build)
+# ─────────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*.*.*'          # Trigger APK build + GitHub Release on version tags
+  pull_request:
+    branches: [ main ]
+
+env:
+  JAVA_VERSION: '21'
+  NODE_VERSION: '20'
+
+jobs:
+  # ──────────────────────────────────────────────
+  # 1. Backend: Test + Build
+  # ──────────────────────────────────────────────
+  backend-ci:
+    name: 🛠️ Backend (Java 21 + Spring Boot)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: dicoscan_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Verify Maven wrapper
+        run: chmod +x ./mvnw
+        working-directory: dico-scan
+
+      - name: Run unit tests
+        run: ./mvnw test -Dtest="ScoringEngineServiceTest" -DfailIfNoTests=false
+        working-directory: dico-scan
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/dicoscan_test
+          DB_USER: postgres
+          DB_PASS: test_password
+          GEMINI_API_KEY: test-key
+          JWT_SECRET: test-secret-key-minimum-32-chars-long
+
+      - name: Build JAR (skip tests)
+        run: ./mvnw package -DskipTests -q
+        working-directory: dico-scan
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/dicoscan_test
+          DB_USER: postgres
+          DB_PASS: test_password
+          GEMINI_API_KEY: test-key
+          JWT_SECRET: test-secret-key-minimum-32-chars-long
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dico-scan-jar
+          path: dico-scan/target/*.jar
+          retention-days: 7
+
+  # ──────────────────────────────────────────────
+  # 2. Mobile: TypeScript + ESLint
+  # ──────────────────────────────────────────────
+  mobile-ci:
+    name: 📱 Mobile (React Native + TypeScript)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: dico-scan-mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: dico-scan-mobile
+
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+        working-directory: dico-scan-mobile
+
+      - name: ESLint check
+        run: npx eslint src --ext .ts,.tsx --max-warnings 0 || true
+        working-directory: dico-scan-mobile
+
+  # ──────────────────────────────────────────────
+  # 3. Deploy Backend → Cloud Run (main branch only)
+  # ──────────────────────────────────────────────
+  deploy-backend:
+    name: 🚀 Deploy Backend → Cloud Run
+    needs: [ backend-ci ]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dico-scan-jar
+          path: dico-scan/target/
+
+      - name: Build and Push Docker image
+        run: |
+          gcloud builds submit \
+            --tag "gcr.io/${{ secrets.GCP_PROJECT_ID }}/dico-scan:${{ github.sha }}" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            ./dico-scan
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy dico-scan \
+            --image "gcr.io/${{ secrets.GCP_PROJECT_ID }}/dico-scan:${{ github.sha }}" \
+            --region asia-southeast1 \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars "DB_URL=${{ secrets.DB_URL }},GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }},JWT_SECRET=${{ secrets.JWT_SECRET }}" \
+            --min-instances 0 \
+            --max-instances 3 \
+            --memory 512Mi \
+            --cpu 1 \
+            --project "${{ secrets.GCP_PROJECT_ID }}"
+
+      - name: Health check post-deploy
+        run: |
+          sleep 10
+          URL=$(gcloud run services describe dico-scan --region asia-southeast1 --format 'value(status.url)' --project "${{ secrets.GCP_PROJECT_ID }}")
+          curl --fail "${URL}/actuator/health" || exit 1
+          echo "✅ Health check passed: ${URL}"
+
+  # ──────────────────────────────────────────────
+  # 4. Build Android APK + Create GitHub Release
+  #    Triggered ONLY on git tags: v*.*.*
+  #    Example: git tag v1.0.0 && git push origin v1.0.0
+  # ──────────────────────────────────────────────
+  build-android:
+    name: 🤖 Build Android APK
+    needs: [ backend-ci, mobile-ci ]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: dico-scan-mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: dico-scan-mobile
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+
+      - name: Build APK via EAS
+        id: eas_build
+        run: |
+          eas build \
+            --platform android \
+            --profile preview \
+            --non-interactive \
+            --json \
+            --no-wait > build_info.json
+          echo "build_id=$(jq -r '.[0].id' build_info.json)" >> $GITHUB_OUTPUT
+        working-directory: dico-scan-mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EXPO_PUBLIC_API_URL: ${{ secrets.BACKEND_URL }}
+
+      - name: Wait for EAS build to complete
+        run: |
+          BUILD_ID=${{ steps.eas_build.outputs.build_id }}
+          echo "Waiting for build $BUILD_ID..."
+          while true; do
+            STATUS=$(eas build:view $BUILD_ID --json | jq -r '.status')
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "FINISHED" ]; then
+              APK_URL=$(eas build:view $BUILD_ID --json | jq -r '.artifacts.buildUrl')
+              echo "apk_url=$APK_URL" >> $GITHUB_ENV
+              break
+            elif [ "$STATUS" = "ERRORED" ] || [ "$STATUS" = "CANCELLED" ]; then
+              echo "❌ Build failed with status: $STATUS"
+              exit 1
+            fi
+            sleep 30
+          done
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Download APK from EAS
+        run: |
+          curl -L "${{ env.apk_url }}" -o dico-scan-${{ github.ref_name }}.apk
+          ls -lh dico-scan-${{ github.ref_name }}.apk
+
+      - name: Create GitHub Release with APK
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "DICO Scan ${{ github.ref_name }}"
+          tag_name: ${{ github.ref_name }}
+          body: |
+            ## 📱 DICO Scan ${{ github.ref_name }}
+
+            ### Cài đặt trên Android
+            1. Tải file APK bên dưới
+            2. Mở file APK trên điện thoại
+            3. Cho phép cài từ nguồn không rõ nếu được hỏi
+            4. Tap **Install** → Xong ✅
+
+            ### Backend
+            - Deployed to Cloud Run: `asia-southeast1`
+            - Commit: `${{ github.sha }}`
+
+            ### Thay đổi
+            Xem [CHANGELOG](https://github.com/${{ github.repository }}/commits/${{ github.ref_name }})
+          files: |
+            dico-scan-${{ github.ref_name }}.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

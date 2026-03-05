@@ -56,6 +56,7 @@ public class ProductApplicationService {
     private final ProductPersistService persistService;
     private final GeminiClient geminiClient;
     private final ProductCategoryDetector categoryDetector;
+    private final ScanHistoryService scanHistoryService;
 
     @Value("${app.product-cache.ttl-days:90}")
     private int cacheTtlDays;
@@ -97,6 +98,8 @@ public class ProductApplicationService {
         Product cached = productRepository.findById(barcode).orElse(null);
         if (cached != null && isFresh(cached)) {
             log.debug("Cache HIT for barcode={}", barcode);
+            // Record to scan history even on cache hit
+            scanHistoryService.recordScan(userId, barcode, cached.getRatingColor());
             return toResponse(cached, Collections.emptyList(), tier);
         }
         log.debug("Cache MISS for barcode={}", barcode);
@@ -132,6 +135,8 @@ public class ProductApplicationService {
 
         // -------- Step 7: Build final response --------
         saved.setAiSummaryCache(aiSummary);
+        // Record to scan history for authenticated users
+        scanHistoryService.recordScan(userId, barcode, saved.getRatingColor());
         return toResponse(saved, result.overrideReasons(), tier);
     }
 
@@ -257,7 +262,7 @@ public class ProductApplicationService {
                 p.getUpdatedAt(),
                 p.getCategory(),
                 categoryWarning,
-                null // riskFactors: populated in future AI-to-structured-data sprint
-        );
+                null, // riskFactors: populated in future AI-to-structured-data sprint
+                p.getOffPayload() != null ? p.getOffPayload().ingredientsText() : null);
     }
 }

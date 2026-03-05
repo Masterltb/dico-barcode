@@ -74,8 +74,9 @@ app:
   jwt:
     secret: ${JWT_SECRET:dico-scan-default-secret-key-change-in-prod-minimum-32-chars}
     expiration-ms: 604800000  # 7 days
-
-# ===== Resilience4j =====
+  rate-limit:
+    scan-per-minute: 20          # Max 20 scan requests / min / IP
+    auth-per-minute: 5           # Max 5 auth attempts / min / IP (brute-force protection)
 resilience4j:
   retry:
     instances:
@@ -88,6 +89,14 @@ resilience4j:
           - org.springframework.web.client.HttpServerErrorException
         ignore-exceptions:
           - org.springframework.web.client.HttpClientErrorException
+      geminiApi:
+        max-attempts: 1           # Gemini is slow — no retry, just circuit break
+        wait-duration: 0ms
+        retry-exceptions:
+          - java.net.SocketTimeoutException
+          - java.io.IOException
+        ignore-exceptions:
+          - com.dico.scan.exception.ExternalServiceException
   circuitbreaker:
     instances:
       offApi:
@@ -97,3 +106,11 @@ resilience4j:
         wait-duration-in-open-state: 30s
         permitted-number-of-calls-in-half-open-state: 3
         register-health-indicator: true
+      geminiApi:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        failure-rate-threshold: 60    # More tolerant — AI summaries are best-effort
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 2
+        register-health-indicator: true
+

@@ -104,15 +104,21 @@ public class JwtAuthFilter extends OncePerRequestFilter {
      */
     private boolean isProtectedEndpoint(HttpServletRequest request) {
         String path = request.getRequestURI();
-        String method = request.getMethod();
-
-        // Preferences update — PREMIUM
-        if (path.equals("/v1/users/me/preferences") && "PUT".equalsIgnoreCase(method))
+        // User preferences + safety profile + scan history + stats
+        if (path.equals("/v1/users/me/preferences"))
             return true;
-        // Safety profile — PREMIUM save
         if (path.equals("/v1/users/me/safety-profile"))
             return true;
-
+        if (path.equals("/v1/users/me/scan-history"))
+            return true;
+        if (path.equals("/v1/users/me/stats"))
+            return true;
+        // Subscription management
+        if (path.startsWith("/v1/subscriptions/"))
+            return true;
+        // Favorites (wishlist)
+        if (path.startsWith("/v1/favorites"))
+            return true;
         return false;
     }
 }

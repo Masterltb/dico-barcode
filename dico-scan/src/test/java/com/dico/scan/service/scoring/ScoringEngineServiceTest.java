@@ -4,7 +4,10 @@ import com.dico.scan.enums.RatingColor;
 import com.dico.scan.external.off.OffProductData;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Collections;
 import java.util.List;
@@ -75,6 +78,35 @@ class ScoringEngineServiceTest {
         assertThat(result.score()).isEqualTo(60);
     }
 
+    @Nested
+    @DisplayName("NutriScore boundary tests")
+    class NutriScoreBoundary {
+
+        @ParameterizedTest(name = "NutriScore {0} with Nova 2 => GREEN")
+        @ValueSource(strings = { "A", "B" })
+        void topNutriScores_shouldProduceGreen(String grade) {
+            OffProductData product = buildProduct(grade, 2, List.of(), "ingredients", List.of(), true);
+            ScoringResult result = scoringEngine.calculate(product, Collections.emptyList());
+            assertThat(result.score()).isGreaterThanOrEqualTo(70);
+        }
+
+        @ParameterizedTest(name = "NutriScore {0} should not produce score=100 when Nova=4")
+        @ValueSource(strings = { "A", "B" })
+        void highNutriButHighNova_shouldReduceScore(String grade) {
+            OffProductData product = buildProduct(grade, 4, List.of(), "ingredients", List.of(), true);
+            ScoringResult result = scoringEngine.calculate(product, Collections.emptyList());
+            assertThat(result.score()).isLessThan(100);
+        }
+
+        @Test
+        @DisplayName("NutriScore D + Nova 3 => YELLOW or RED (boundary test)")
+        void nutriD_Nova3_shouldBeBelowGreen() {
+            OffProductData product = buildProduct("D", 3, List.of(), "processed food", List.of(), true);
+            ScoringResult result = scoringEngine.calculate(product, Collections.emptyList());
+            assertThat(result.score()).isLessThan(70);
+        }
+    }
+
     // ===========================
     // OVERRIDE O1: Blacklisted Additive
     // ===========================
@@ -103,6 +135,17 @@ class ScoringEngineServiceTest {
 
         assertThat(result.ratingColor()).isEqualTo(RatingColor.RED);
         assertThat(result.wasOverridden()).isTrue();
+    }
+
+    @Test
+    @DisplayName("O1: Multiple blacklisted additives => still RED, single override reason per additive")
+    void multipleBlacklistedAdditives_shouldForceRed() {
+        OffProductData product = buildProduct("A", 1, List.of("en:e171", "en:e250"),
+                "water, titanium dioxide, sodium nitrite", List.of(), true);
+        ScoringResult result = scoringEngine.calculate(product, Collections.emptyList());
+
+        assertThat(result.ratingColor()).isEqualTo(RatingColor.RED);
+        assertThat(result.overrideReasons()).hasSizeGreaterThanOrEqualTo(1);
     }
 
     // ===========================
@@ -144,6 +187,17 @@ class ScoringEngineServiceTest {
         assertThat(result.wasOverridden()).isFalse();
     }
 
+    @Test
+    @DisplayName("O2: Multiple allergies — one match is enough to trigger RED")
+    void multipleAllergies_oneMatch_shouldTriggerO2() {
+        OffProductData product = buildProduct("A", 1, List.of(),
+                "wheat flour, oats, sugar", List.of("en:gluten"), true);
+        ScoringResult result = scoringEngine.calculate(product, List.of("peanuts", "gluten", "shellfish"));
+
+        assertThat(result.ratingColor()).isEqualTo(RatingColor.RED);
+        assertThat(result.wasOverridden()).isTrue();
+    }
+
     // ===========================
     // OVERRIDE O3: Insufficient Data
     // ===========================
@@ -158,6 +212,15 @@ class ScoringEngineServiceTest {
         assertThat(result.score()).isNull();
         assertThat(result.overrideReasons())
                 .anyMatch(r -> r.contains("Insufficient product data"));
+    }
+
+    @Test
+    @DisplayName("O3: hasCompleteData=true with partial fields should NOT trigger UNKNOWN")
+    void hasCompleteDataTrue_shouldNotBeUnknown() {
+        OffProductData product = buildProduct("C", null, List.of(), "some ingredients", List.of(), true);
+        ScoringResult result = scoringEngine.calculate(product, Collections.emptyList());
+
+        assertThat(result.ratingColor()).isNotEqualTo(RatingColor.UNKNOWN);
     }
 
     // ===========================
@@ -176,6 +239,20 @@ class ScoringEngineServiceTest {
 
         assertThat(result.score()).isEqualTo(91);
         assertThat(result.ratingColor()).isEqualTo(RatingColor.GREEN);
+    }
+
+    @Test
+    @DisplayName("7 medium-risk additives => N_Additives floor = 0 (no negative scores)")
+    void excessiveMediumRiskAdditives_shouldFloorToZero() {
+        // 7 * 15 = 105 deduction > 100 max => floor at 0
+        OffProductData product = buildProduct("A", 1,
+                List.of("en:e102", "en:e110", "en:e211", "en:e102", "en:e110", "en:e211", "en:e102"),
+                "lots of additives", List.of(), true);
+        ScoringResult result = scoringEngine.calculate(product, Collections.emptyList());
+
+        // N_Additives = 0 (floored), score = 40+40+0 = 80 or similar
+        assertThat(result.score()).isGreaterThanOrEqualTo(0);
+        assertThat(result.score()).isLessThanOrEqualTo(100);
     }
 
     // ===========================

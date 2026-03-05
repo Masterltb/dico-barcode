@@ -3,6 +3,8 @@ package com.dico.scan.external.gemini;
 import com.dico.scan.enums.ProductCategory;
 import com.dico.scan.external.off.OffProductData;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.retry.annotation.Retry;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -59,6 +61,8 @@ public class GeminiClient {
      * @param safetyProfile Full safety profile from questionnaire. Null = no
      *                      profile
      */
+    @Retry(name = "geminiApi")
+    @CircuitBreaker(name = "geminiApi", fallbackMethod = "geminiFallback")
     public AiAnalysisResult analyze(OffProductData productData, ProductCategory category,
             List<String> userAllergies, Map<String, Object> safetyProfile) {
         if (geminiApiKey == null || geminiApiKey.isBlank()) {
@@ -73,6 +77,17 @@ public class GeminiClient {
             log.warn("Gemini call failed for barcode={}: {}", productData.barcode(), ex.getMessage());
             return FALLBACK;
         }
+    }
+
+    /**
+     * Fallback when Gemini circuit breaker OPEN or retries exhausted.
+     * Returns cached FALLBACK message — system stays functional.
+     */
+    @SuppressWarnings("unused")
+    public AiAnalysisResult geminiFallback(OffProductData productData, ProductCategory category,
+            List<String> userAllergies, Map<String, Object> safetyProfile, Throwable ex) {
+        log.warn("Gemini circuit breaker OPEN for barcode={}. Reason: {}", productData.barcode(), ex.getMessage());
+        return FALLBACK;
     }
 
     private String buildPrompt(OffProductData data, ProductCategory category,
@@ -325,5 +340,115 @@ public class GeminiClient {
                 .replaceAll("^```json\\s*", "")
                 .replaceAll("\\s*```$", "");
         return objectMapper.readValue(cleaned, AiAnalysisResult.class);
+    }
+
+    // ================================================================
+    // ALTERNATIVE PRODUCT SUGGESTIONS — Separate from analyze() flow
+    // ================================================================
+
+    /**
+     * Asks Gemini to suggest better product alternatives in the same category.
+     *
+     * GUARDRAIL: AI CANNOT produce ratings/scores. Only name, brand, and reason.
+     * Returns empty list on any error — non-fatal, DB results are the primary
+     * source.
+     *
+     * @param productName   Current product being scanned
+     * @param category      FOOD / BEAUTY / TOY / FASHION / GENERAL
+     * @param userAllergies User's allergy list. Empty = anonymous/FREE
+     * @param limit         Max number of suggestions to return
+     */
+    @CircuitBreaker(name = "geminiApi", fallbackMethod = "alternativesFallback")
+    public List<AiAlternativeSuggestion> suggestAlternatives(
+            String productName, String productBrand, String category,
+            String currentRating, List<String> userAllergies, int limit) {
+        if (geminiApiKey == null || geminiApiKey.isBlank()) {
+            log.debug("Gemini key not set — skipping AI alternatives");
+            return Collections.emptyList();
+        }
+        try {
+            String prompt = buildAlternativesPrompt(productName, productBrand, category, currentRating, userAllergies,
+                    limit);
+            String raw = callGeminiApi(prompt);
+            return parseAlternativesResponse(raw);
+        } catch (Exception ex) {
+            log.warn("AI alternatives failed for '{}' ({}): {}", productName, category, ex.getMessage());
+            return Collections.emptyList();
+        }
+    }
+
+    @SuppressWarnings("unused")
+    public List<AiAlternativeSuggestion> alternativesFallback(
+            String productName, String productBrand, String category,
+            String currentRating, List<String> userAllergies, int limit, Throwable ex) {
+        log.warn("Gemini circuit open for alternatives. product={} category={}", productName, category);
+        return Collections.emptyList();
+    }
+
+    private String buildAlternativesPrompt(String productName, String productBrand, String category,
+            String currentRating, List<String> allergies, int limit) {
+
+        String brand = (productBrand != null && !productBrand.isBlank()) ? productBrand : "Unknown";
+        String ratingDesc = switch (currentRating != null ? currentRating : "UNKNOWN") {
+            case "RED" -> "bị đánh giá NGUY HIỂM (nhiều thành phần có hại)";
+            case "YELLOW" -> "bị đánh giá CẦN CHÚ Ý (một số thành phần đáng lo ngại)";
+            default -> "chưa được đánh giá an toàn";
+        };
+
+        String allergyContext = allergies.isEmpty()
+                ? "Không có yêu cầu dị ứng đặc biệt."
+                : "Người dùng dị ứng với: " + String.join(", ", allergies)
+                        + " — TRÁNH đề xuất những sản phẩm chứa các thành phần này.";
+
+        String categoryContext = switch (category.toUpperCase()) {
+            case "FOOD" -> "Thực phẩm / Đồ uống tại Việt Nam — tập trung vào sản phẩm local phổ biến";
+            case "BEAUTY" -> "Mỹ phẩm / Chăm sóc da / Tóc — danh tiếng thương hiệu là ưu tiên";
+            case "TOY" -> "Đồ chơi trẻ em — an toàn và có chứng nhận CE/TCVN";
+            case "FASHION" -> "Thời trang / Phụ kiện — chất liệu an toàn, không hóa chất độc hại";
+            default -> "Sản phẩm tiêu dùng chung tại Việt Nam";
+        };
+
+        return String.format("""
+                Bạn là chuyên gia gợi ý sản phẩm tại thị trường Việt Nam (API, không phải chatbot).
+
+                Sản phẩm hiện tại cần thay thế: "%s" của thương hiệu "%s".
+                Lý do cần thay thế: Sản phẩm này %s.
+                Ngành hàng: %s — %s
+                Yêu cầu dị ứng: %s
+
+                Nhiệm vụ: Đề xuất %d sản phẩm thay thế TỐT HƠN và KHÁC với sản phẩm trên.
+
+                Ràng buộc bắt buộc:
+                1. KHÔNG thêm bất kỳ text nào ngoài JSON array. KHÔNG dùng ```json wrappers.
+                2. Chỉ đề xuất sản phẩm THỰC SỰ TỒN TẠI tại Việt Nam (thương hiệu nổi tiếng).
+                3. "reason" ngắn gọn (<15 từ): lý do cụ thể tại sao tốt hơn sản phẩm gốc.
+                4. "why_better" giải thích kỹ hơn (<30 từ) về thành phần/chất lượng vượt trội.
+                5. Không đề xuất sản phẩm chứa chất gây dị ứng đã liệt kê.
+                6. Đa dạng thương hiệu — không lặp lại cùng 1 brand.
+                7. KHÔNG đề xuất lại chính sản phẩm "%s" của "%s".
+
+                Trả về JSON array theo đúng schema (không thêm field khác):
+                [{"name":"...","brand":"...","reason":"...","why_better":"..."}]
+                """,
+                productName, brand, ratingDesc, category, categoryContext, allergyContext,
+                limit, productName, brand);
+    }
+
+    private List<AiAlternativeSuggestion> parseAlternativesResponse(String rawText) throws Exception {
+        String cleaned = rawText.trim()
+                .replaceAll("^```json\\s*", "")
+                .replaceAll("\\s*```$", "")
+                .trim();
+        // Gemini sometimes wraps in an outer object — extract the array
+        if (cleaned.startsWith("{")) {
+            // Try to extract array from {"suggestions": [...]} or similar
+            int start = cleaned.indexOf('[');
+            int end = cleaned.lastIndexOf(']');
+            if (start >= 0 && end > start) {
+                cleaned = cleaned.substring(start, end + 1);
+            }
+        }
+        return objectMapper.readValue(cleaned,
+                objectMapper.getTypeFactory().constructCollectionType(List.class, AiAlternativeSuggestion.class));
     }
 }
