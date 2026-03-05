@@ -1,6 +1,7 @@
 package com.dico.scan.service;
 
 import com.dico.scan.dto.request.UpdatePreferencesRequest;
+import com.dico.scan.entity.User;
 import com.dico.scan.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,24 +21,21 @@ public class UserService {
 
     /**
      * Idempotent update of user allergy preferences.
-     * Uses @Modifying JPQL update to avoid loading the full User entity.
+     * Loads the User entity to take advantage of Hibernate JSONB mappings.
      */
     @Transactional
     public void updatePreferences(UUID userId, UpdatePreferencesRequest request) {
-        boolean exists = userRepository.existsById(userId);
-        if (!exists) {
-            throw new RuntimeException("User not found: " + userId);
-        }
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found: " + userId));
 
         Map<String, Object> prefs = new HashMap<>();
         prefs.put("allergies", request.allergies());
         prefs.put("diet", request.diet() != null ? request.diet() : "");
 
-        int updated = userRepository.updatePreferences(userId, prefs);
+        user.setPreferences(prefs);
+        userRepository.save(user);
+
         log.info("Preferences updated for userId={}, allergies={}, diet={}", userId, request.allergies(),
                 request.diet());
-        if (updated == 0) {
-            log.warn("No rows updated for userId={}", userId);
-        }
     }
 }

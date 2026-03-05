@@ -1,37 +1,57 @@
-# Business Requirements Document - MVP V2
+# Business Requirements Document - MVP V2 (Cập nhật)
 
 ## 1. Tổng quan MVP
-**DICO Scan MVP** nhằm mục đích rút ngắn thời gian cảnh báo rủi ro thực phẩm cho người tiêu dùng xuống **dưới 2 giây** thông qua cơ chế quét Barcode (tập trung tại quầy siêu thị).
+**DICO Scan MVP** nhằm mục đích rút ngắn thời gian cảnh báo rủi ro sản phẩm cho người tiêu dùng xuống **dưới 2 giây** thông qua cơ chế quét Barcode. Hệ thống hỗ trợ **đa danh mục sản phẩm** (Thực phẩm, Đồ chơi, Mỹ phẩm, Thời trang) với **2 gói dịch vụ** (FREE/PREMIUM).
 
-## 2. In-Scope / Out-of-Scope (Ranh giới MVP)
-| Tiêu chí | MVP (Phase 1 - In Scope) | Tương lai (Phase 2+ - Out of Scope) | Căn cứ ràng buộc |
+## 2. In-Scope / Out-of-Scope
+| Tiêu chí | MVP (Đã Triển khai) | Tương lai (Phase 2+) | Ghi chú |
 | :--- | :--- | :--- | :--- |
-| Nguồn Dữ liệu | Lấy trực tiếp từ OFF API (REST). Cache DB nội bộ. | Thu mua dữ liệu từ GS1 Việt Nam. | Tiết kiệm chi phí đầu vào. |
-| Cơ chế Scorer | Deterministic Scoring với N_score, Nova, Additives. | Scoring dựa trên ML phân tích mức sống. | Phase 1 bắt buộc dùng toán deterministic. |
-| Vai trò LLM | Tóm tắt điểm yếu (< 50 từ). Trả về JSON chuẩn. | Chatbot tương tác tự do với AI Coach. | Chỉ định đoạt AI_SUMMARY, chống sinh nội dung ảo (hallucination).|
-| Hồ sơ người dùng | Thiết lập tối đa 5 loại dị ứng (Allergens) dạng tags, 1 Diet type (JSONB). | Kết nối Apple Health/Google Fit, Medical records. | Database chỉ lưu `user.preferences.allergies`. |
-| Thanh toán | Đăng ký tài khoản miễn phí. API xử lý public/auth headers. | Subscription/VIP qua iOS/AOS In-App Purchase. | Chưa triển khai module Account Balance/Payments. |
-| Trải nghiệm xử lý thiếu mã vạch| Hiển thị `UNKNWON` + Yêu cầu cung cấp ảnh (đẩy cất lên Cloud Storage). | Nhận diện Camera thời gian thực OCR trên Mobile (Live Scanner).| Bỏ qua quy trình ML OCR trực tiếp ở MVP, xử lý off-cloud (async worker). |
+| Nguồn Dữ liệu | OFF API (REST) + Cache DB nội bộ. | GS1 Việt Nam, thêm data sources. | |
+| Cơ chế Scorer | Deterministic Scoring: N_score/Nova/Additives + Multi-category. | ML phân tích mức sống. | |
+| Vai trò LLM | Tóm tắt rủi ro < 50 từ (JSON). Category-specific prompts. | Chatbot tương tác AI Coach. | |
+| Hồ sơ người dùng | Safety Profile wizard 8 bước: allergies, skin type, health, diet. Child/Pregnancy branches. | Apple Health/Google Fit. | PREMIUM only |
+| Đăng ký/Đăng nhập | Email + Password, JWT token, BCrypt hash. | OAuth2 (Google/Apple). | |
+| Gói dịch vụ | FREE (generic) / PREMIUM (personalized). | In-App Purchase integration. | `SubscriptionTier` enum |
+| Đa danh mục | FOOD, TOY, BEAUTY, FASHION, GENERAL. | Thêm categories mới. | `ProductCategory` enum |
+| Đóng góp dữ liệu | Upload ảnh → 202 Accepted (stub). | GCS + async OCR Pub/Sub. | |
 
-## 3. Core Workflow (Chấp nhận Tiêu chuẩn MVP)
-**Luồng 1: Scan Barcode Thành công**
-- Trigger: Người dùng quét 1 mã EAN-13 (vd: `8934567890123`).
-- Action: Mobile App Request: `GET /v1/products/8934567890123`
-- System process:
-  - Cache Hit: Có trong DB PostgreSQL -> Trả ngay (<200ms).
-  - Cache Miss: API Backend gọi OFF. Nếu OFF có -> Calculate Scoring (0-100) -> Calculate Color -> Trigger AI (Timeout 2000ms) để lấy Summary -> Response Mobile.
-- User Criteria (Thành công): System trả về 1 thẻ màu xanh/vàng hoặc đỏ, điểm chuẩn tổng, list additive cảnh báo (nếu có), tóm tắt chữ tiếng Việt.
+## 3. Core Workflow
 
-## 4. Acceptance Criteria (Tiêu chí Nghiệm thu Hệ thống Kỹ thuật)
+### Luồng 1: Scan Barcode (Đa danh mục + Tier-gated)
+- Trigger: Người dùng quét mã EAN-8 đến EAN-14.
+- Action: `GET /v1/products/{barcode}` với header `X-User-Id`.
+- System process (7 bước Orchestrator):
+  1. Load User → xác định Tier (FREE/PREMIUM)
+  2. Cache Check trong DB PostgreSQL → nếu fresh → trả ngay (< 200ms)
+  3. Cache Miss → gọi OpenFoodFacts API
+  4. Phát hiện danh mục sản phẩm (CategoryDetector)
+  5. Deterministic Scoring (0-100) + Overrides
+  6. Persist kết quả vào DB
+  7. Gọi AI Gemini → lấy summary → cập nhật DB → trả response
+
+### Luồng 2: Đăng ký / Đăng nhập
+- `POST /v1/auth/register` → Tạo user (FREE mặc định) → JWT token
+- `POST /v1/auth/login` → Xác thực → JWT token
+
+### Luồng 3: Safety Profile (PREMIUM)
+- `PUT /v1/users/me/safety-profile` → Lưu questionnaire 8 bước
+- `GET /v1/users/me/safety-profile` → Xem hồ sơ hiện tại
+
+## 4. Acceptance Criteria
+
 ### 4.1. Performance Objectives (SLOs)
-- `P95` Latency cho Cache Hit Endpoint `/v1/products/{barcode}`: `< 200ms`.
-- `P95` Latency cho Cache Miss (Gọi OFF + Gọi AI Inference): `< 2500ms`.
-- System Fallback Timeout: Nếu gọi AI inference vượt 2000ms -> Ngắt request, trả về Color Deterministic Score giữ nguyên tính chính xác (AI_summary = null).
+- `P95` Latency Cache Hit `/v1/products/{barcode}`: `< 200ms`.
+- `P95` Latency Cache Miss (OFF + AI): `< 2500ms`.
+- Fallback Timeout: AI > 2000ms → trả Score không có AI summary.
 
 ### 4.2. Functional Objectives
-- **AC_01**: Nếu sản phẩm có chứa "Peanut" và `user.preferences.allergies` có chứa "peanut" => System phải trả về `override_reasons` mảng có phần tử "Allergy Conflict: peanut" VÀ màu BẮT BUỘC trả về `RED`.
-- **AC_02**: Bất kỳ sản phẩm nào có `N_Score + N_Nova + N_Additives < 40` đều trả về màu `RED`.
+- **AC_01**: PREMIUM user có "Peanut" trong safety profile → sản phẩm chứa peanut phải trả `RED` + `override_reasons`.
+- **AC_02**: Sản phẩm có `Final_Score < 40` → màu `RED`.
+- **AC_03**: FREE user → không thấy personal allergy conflicts trong `overrideReasons`.
+- **AC_04**: Sản phẩm TOY → hiển thị categoryWarning về giới hạn tuổi.
+- **AC_05**: Sản phẩm BEAUTY → hiển thị cảnh báo thành phần kích ứng.
 
 ### 4.3. Security & Compliance
-- **SEC_01**: Không lưu mật khẩu raw. Cấp token JWT (RS256) hiệu lực 30 ngày.
-- **SEC_02**: Mọi request đến `/v1/evaluate` đều bị kiểm soát bởi Rate Limiting (Tối đa 20 request/phút/IP) để tránh DOS cạn kiệt tài khoản Gemini Cloud API.
+- **SEC_01**: Password → BCrypt hash. JWT token (HS256).
+- **SEC_02**: Safety Profile inputs → sanitize HTML, strip dangerous chars, limit length.
+- **SEC_03**: PREMIUM-gated endpoints (preferences, safety-profile) → 403 cho FREE users.

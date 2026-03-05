@@ -1,17 +1,76 @@
 openapi: 3.0.3
 info:
   title: DICO Scan API Production V2
-  description: "API Core phục vụ Mobile App quét mã vạch, phân tích thực phẩm bằng Deterministic Scoring Engine và Gemini 1.5 Flash AI."
-  version: 2.0.0
+  description: "API Core phục vụ Mobile App quét mã vạch, phân tích sản phẩm đa danh mục (FOOD/TOY/BEAUTY/FASHION) bằng Deterministic Scoring Engine và Gemini 1.5 Flash AI. Hỗ trợ FREE/PREMIUM tier gating."
+  version: 2.1.0
 servers:
   - url: https://api.dico-scan.com
     description: Production Server
 
 paths:
+  # ============================================
+  # AUTHENTICATION (PUBLIC — No JWT Required)
+  # ============================================
+  /v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Đăng ký tài khoản mới.
+      description: Tạo user với email + password. Trả JWT token ngay khi thành công. Mặc định subscription_tier = FREE.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Đăng ký thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '409':
+          description: Email đã tồn tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+  /v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Đăng nhập bằng email và mật khẩu.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Đăng nhập thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          description: Email hoặc mật khẩu không đúng.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
+
+  # ============================================
+  # PRODUCT EVALUATION
+  # ============================================
   /v1/products/{barcode}:
     get:
-      summary: Retrieves deterministic score, green/yellow/red color, and AI summary (Optional).
-      description: API chính chịu tải cao nhất từ Mobile App. Có cache.
+      tags: [Products]
+      summary: Đánh giá sản phẩm theo barcode (Multi-category, Tier-gated).
+      description: |
+        Luồng chính: DB Cache → OFF Fetch → Category Detection → Deterministic Scoring → AI Summary.
+        - FREE: Generic scoring, không có personal allergy override.
+        - PREMIUM: Full personalization, allergy alerts, family profile, category-specific warnings.
       parameters:
         - name: barcode
           in: path
@@ -19,52 +78,128 @@ paths:
           schema:
             type: string
             pattern: '^[0-9]{8,14}$'
-        - name: X-Trace-Id
+        - name: X-User-Id
           in: header
           required: false
           schema:
             type: string
-            description: Phục vụ tracing log Datadog/ELK
+            format: uuid
+          description: "Optional. Nếu có → load subscription tier từ DB."
+        - name: allergies
+          in: query
+          required: false
+          schema:
+            type: string
+          description: "Optional. Comma-separated allergy list (dùng khi PREMIUM chưa có saved preferences)."
       responses:
         '200':
-          description: OK - Sản phẩm được lấy và chấm điểm thành công.
+          description: OK — Sản phẩm được đánh giá thành công.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProductEvaluationResponse'
         '404':
-          description: Not Found - Không tìm thấy barcode này trên toàn bộ Database lẫn OpenFoodFacts.
+          description: Not Found — Barcode không tìm thấy trên DB lẫn OpenFoodFacts.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/StandardError'
 
+  # ============================================
+  # USER PREFERENCES (PREMIUM ONLY)
+  # ============================================
   /v1/users/me/preferences:
     put:
-      summary: Cập nhật thông số dị ứng User (Idempotent).
+      tags: [Users]
+      summary: Cập nhật dị ứng & chế độ ăn (PREMIUM ONLY).
+      description: Idempotent. Ghi đè toàn bộ preferences JSONB. FREE users nhận 403.
       security:
         - BearerAuth: []
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              properties:
-                allergies:
-                  type: array
-                  items:
-                    type: string
-                diet:
-                  type: string
-                  example: "Keto"
+              $ref: '#/components/schemas/UpdatePreferencesRequest'
       responses:
         '200':
           description: Cập nhật thành công.
+        '403':
+          description: Yêu cầu gói PREMIUM.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardError'
 
+  # ============================================
+  # SAFETY PROFILE (PREMIUM ONLY)
+  # ============================================
+  /v1/users/me/safety-profile:
+    put:
+      tags: [Safety Profile]
+      summary: Lưu hồ sơ an toàn từ questionnaire wizard (PREMIUM ONLY).
+      description: |
+        Lưu toàn bộ câu trả lời bảng khảo sát 8 bước. Bao gồm:
+        - Đối tượng sử dụng (SELF, CHILD, PREGNANT, MEDICAL, GENERAL)
+        - Dị ứng thực phẩm & mỹ phẩm
+        - Loại da, tình trạng sức khỏe, chế độ ăn
+        - Mức cảnh báo & mức dị ứng
+        FREE users nhận 403.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveSafetyProfileRequest'
+      responses:
+        '200':
+          description: Lưu thành công.
+        '403':
+          description: Yêu cầu gói PREMIUM.
+    get:
+      tags: [Safety Profile]
+      summary: Lấy hồ sơ an toàn hiện tại.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: X-User-Id
+          in: header
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Trả về hồ sơ an toàn.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyProfileResponse'
+
+  # ============================================
+  # CONTRIBUTION (User-contributed products)
+  # ============================================
   /v1/contribute:
     post:
-      summary: Upload nhãn mác sản phẩm mới khi bị 404 (Content-Type multipart/form-data).
+      tags: [Contribute]
+      summary: Upload ảnh nhãn sản phẩm khi barcode bị 404.
+      description: Nhận multipart file. Trả HTTP 202 Accepted. Async OCR xử lý sau (Phase 2+).
       security:
         - BearerAuth: []
       requestBody:
@@ -74,24 +209,68 @@ paths:
             schema:
               type: object
               properties:
+                barcode:
+                  type: string
                 image:
                   type: string
                   format: binary
-                barcode:
-                  type: string
+              required: [barcode, image]
       responses:
         '202':
-          description: Accepted (Async xử lý sau).
+          description: Accepted — ảnh được tiếp nhận, xử lý async.
+        '413':
+          description: Payload Too Large — ảnh vượt quá 10MB.
 
 components:
   schemas:
+    # === Auth ===
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        password:
+          type: string
+          minLength: 6
+          maxLength: 100
+        displayName:
+          type: string
+          maxLength: 100
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: "JWT token (HS256), hiệu lực 30 ngày."
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+        displayName:
+          type: string
+        subscriptionTier:
+          type: string
+          enum: [FREE, PREMIUM]
+
+    # === Product ===
     ProductEvaluationResponse:
       type: object
-      required:
-        - barcode
-        - rating
-        - score
-        - confidence_score
+      required: [barcode, rating]
       properties:
         barcode:
           type: string
@@ -100,6 +279,9 @@ components:
           type: string
         brand:
           type: string
+        imageUrl:
+          type: string
+          description: "URL ảnh sản phẩm từ OFF."
         rating:
           type: string
           enum: [GREEN, YELLOW, RED, UNKNOWN]
@@ -107,23 +289,183 @@ components:
           type: integer
           minimum: 0
           maximum: 100
-        confidence_score:
+          nullable: true
+        confidenceScore:
           type: number
           format: float
           minimum: 0.0
           maximum: 1.0
-          description: "1.0 = Đầy đủ data thành phần + bảng thành phần. <1.0 = thiếu"
-        ai_summary:
+          description: "1.0 = data đầy đủ. <1.0 = thiếu data."
+        aiSummary:
           type: string
           maxLength: 300
-          description: "Tóm tắt từ AI. Có thể là NULL nếu AI call timeout/failed."
           nullable: true
-        override_reasons:
+          description: "Tóm tắt AI (<50 từ). NULL nếu AI timeout."
+        overrideReasons:
           type: array
           items:
             type: string
-          description: "Lý do bị ép thẻ RED nếu vi phạm dị ứng hoặc phụ gia cấm."
+          nullable: true
+          description: "Lý do ép RED: dị ứng / phụ gia cấm."
+        cachedAt:
+          type: string
+          format: date-time
+          description: "Thời gian cache sản phẩm."
+        category:
+          type: string
+          enum: [FOOD, TOY, BEAUTY, FASHION, GENERAL]
+          description: "Danh mục sản phẩm được tự động nhận diện."
+        categoryWarning:
+          type: string
+          nullable: true
+          description: "Cảnh báo theo danh mục sản phẩm."
+        riskFactors:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: "Các yếu tố rủi ro cụ thể theo danh mục."
 
+    # === User Preferences ===
+    UpdatePreferencesRequest:
+      type: object
+      required: [allergies]
+      properties:
+        allergies:
+          type: array
+          items:
+            type: string
+          maxItems: 20
+        diet:
+          type: string
+          maxLength: 50
+          example: "vegan"
+
+    # === Safety Profile ===
+    SaveSafetyProfileRequest:
+      type: object
+      required: [targets]
+      properties:
+        targets:
+          type: array
+          items:
+            type: string
+            enum: [SELF, CHILD, PREGNANT, MEDICAL, GENERAL]
+          minItems: 1
+          maxItems: 5
+        childProfile:
+          type: object
+          properties:
+            ageGroup:
+              type: string
+              enum: [M0_6, M6_12, Y1_3, Y4_6, Y7_12, Y12_PLUS]
+            allergies:
+              type: array
+              items:
+                type: string
+            customAllergies:
+              type: array
+              items:
+                type: string
+            severityLevel:
+              type: string
+              enum: [MILD, MODERATE, SEVERE]
+        pregnancyProfile:
+          type: object
+          properties:
+            trimester:
+              type: string
+              enum: [TRIMESTER_1, TRIMESTER_2, TRIMESTER_3, UNKNOWN]
+            alertLevel:
+              type: string
+              enum: [STRICT, MODERATE, BASIC]
+        foodAllergies:
+          type: array
+          items:
+            type: string
+          maxItems: 20
+        customFoodAllergies:
+          type: array
+          items:
+            type: string
+          maxItems: 5
+        cosmeticSensitivities:
+          type: array
+          items:
+            type: string
+          maxItems: 15
+        customCosmeticSensitivities:
+          type: array
+          items:
+            type: string
+          maxItems: 5
+        skinType:
+          type: string
+          enum: [OILY, DRY, COMBINATION, SENSITIVE, UNKNOWN]
+        healthConditions:
+          type: array
+          items:
+            type: string
+            enum: [PREGNANT, BREASTFEEDING, CHILD_UNDER_12, DIABETES, HYPERTENSION, KIDNEY_DISEASE, LIVER_DISEASE, NONE]
+          maxItems: 10
+        dietaryPreferences:
+          type: array
+          items:
+            type: string
+            enum: [VEGAN, VEGETARIAN, EAT_CLEAN, ORGANIC, HALAL, NONE]
+          maxItems: 5
+        alertLevel:
+          type: string
+          enum: [STRICT, MODERATE, BASIC]
+        allergySeverity:
+          type: string
+          enum: [MILD, MODERATE, SEVERE]
+
+    SafetyProfileResponse:
+      type: object
+      properties:
+        targets:
+          type: array
+          items:
+            type: string
+        childProfile:
+          type: object
+        pregnancyProfile:
+          type: object
+        foodAllergies:
+          type: array
+          items:
+            type: string
+        customFoodAllergies:
+          type: array
+          items:
+            type: string
+        cosmeticSensitivities:
+          type: array
+          items:
+            type: string
+        customCosmeticSensitivities:
+          type: array
+          items:
+            type: string
+        skinType:
+          type: string
+        healthConditions:
+          type: array
+          items:
+            type: string
+        dietaryPreferences:
+          type: array
+          items:
+            type: string
+        alertLevel:
+          type: string
+        allergySeverity:
+          type: string
+        profileCompleted:
+          type: boolean
+
+    # === Standard Error ===
     StandardError:
       type: object
       properties:

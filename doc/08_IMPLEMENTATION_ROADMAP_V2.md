@@ -1,92 +1,111 @@
-# Lộ trình Triển khai MVP - Implementation Roadmap V2 (Detailed Execution Guide for AI Agents)
+# Lộ trình Triển khai — Implementation Roadmap V2 (Cập nhật)
 
-Tài liệu này là **Kim chỉ nam thực thi (Execution Guide)** phân rã chi tiết từng tính năng thành các micro-steps chuẩn Production. AI Agent hoặc Lập trình viên **bắt buộc phải check-off từng ô một (tickbox)** theo đúng thứ tự để đảm bảo hiệu năng, chống N+1 query, và chống sập Connection Pool.
+Tài liệu này là **Kim chỉ nam thực thi** phân rã chi tiết từng tính năng. Đánh dấu `[x]` = hoàn thành, `[ ]` = chưa triển khai.
 
 ---
 
-## 🚀 Sprint 1: Nền tảng Core & Data Bridge (Foundation)
-**Mục tiêu:** Xây dựng xong bộ sườn Serverless Backend, kết nối Database, và tích hợp chuẩn xác với OpenFoodFacts (OFF). Chưa có logic tính điểm, chưa có AI.
+## ✅ Sprint 1: Nền tảng Core & Data Bridge (HOÀN THÀNH)
+**Mục tiêu:** Backend foundation, DB, OpenFoodFacts Client.
 
 ### Task 1.1: Khởi tạo Project & CSDL
-- [ ] **1.1.1.** Khởi tạo project Spring Boot 3.x (Java 21) với các dependencies: `Web`, `Data JPA`, `PostgreSQL`, `Validation`, `Actuator`, `Lombok`, `Flyway`.
-- [ ] **1.1.2.** Tạo file `V1__init_schema.sql` trong `src/main/resources/db/migration`. Định nghĩa 3 bảng `users`, `products`, `scan_history` chuẩn PostgreSQL (Sử dụng `VARCHAR`, `JSONB` cho payload). Tối thiểu khởi tạo Index GIN cho `users.preferences`.
-- [ ] **1.1.3.** Chạy ứng dụng lần đầu kết nối với Local PostgreSQL để Flyway gen bảng tự động.
+- [x] **1.1.1.** Spring Boot 3.x (Java 21): Web, Data JPA, PostgreSQL, Validation, Actuator, Lombok, Flyway.
+- [x] **1.1.2.** `V1__init_schema.sql`: 3 bảng `users`, `products`, `scan_history` + GIN Index.
+- [x] **1.1.3.** Flyway migrations chạy thành công (V1 → V4).
 
-### Task 1.2: Xây dựng Core Entities & Repositories (Quy tắc 09 phải áp dụng)
-- [ ] **1.2.1.** Tạo Entity `User`, `Product`, `ScanHistory`. Tuyệt đối **không** khai báo `@OneToMany List<ScanHistory>` trong `User`. Chỉ cấu hình Unidirectional từ Entity con (`@ManyToOne` trong `ScanHistory`).
-- [ ] **1.2.2.** Đảm bảo kiểu dữ liệu `product_data_payload` (JSONB của bảng Products) được mapping custom bằng thư viện `vladmihalcea:hibernate-types` hoặc native JPA 3 converter sang class `com.fasterxml.jackson.databind.JsonNode`.
-- [ ] **1.2.3.** Tạo `ProductRepository`. Định nghĩa interface DTO Projection để fetch sản phẩm (`ProductSummaryView`). Cấm dùng `findAll()` trả ra entity list nguyên gốc.
+### Task 1.2: Core Entities & Repositories
+- [x] **1.2.1.** Entities: `User`, `Product`, `ScanHistory`. Unidirectional only (Guardrail Rule 2).
+- [x] **1.2.2.** JSONB mapping: `@JdbcTypeCode(SqlTypes.JSON)` cho `off_payload`, `preferences`, `safety_profile`.
+- [x] **1.2.3.** `ProductRepository`, `UserRepository`, `ScanHistoryRepository`.
 
-### Task 1.3: Tích hợp OpenFoodFacts Client (Spec 07)
-- [ ] **1.3.1.** Thêm dependency thư viện `Resilience4j` (CircuitBreaker, Retry).
-- [ ] **1.3.2.** Tạo `OpenFoodFactsClient` dùng `RestTemplate` hoặc `WebClient`. Setup cấu hình timeout trong `application.yml` (Connect: 1000ms, Read: 3000ms).
-- [ ] **1.3.3.** Cài đặt `@Retry(name = "offApi")` và `@CircuitBreaker(name = "offApi", fallbackMethod = "offFallback")`. Setup retry chỉ bám vào Exception `5xx` hoặc `TimeoutException`, không retry `4xx`.
-- [ ] **1.3.4.** Xây dựng hàm parser `OffResponseParser`: Extract giá trị an toàn (Chống NullPointerExceptions tại các trường `nutriments`, `allergens_hierarchy`).
-
-**💡 Definition of Done (DoD - Sprint 1):**
-- System chạy lên gọi được hàm OFF Client, in log thành công payload Product 8934567812 mà không ném lỗi Null.
+### Task 1.3: OpenFoodFacts Client
+- [x] **1.3.1.** `OpenFoodFactsClient` với RestTemplate + timeout config.
+- [x] **1.3.2.** `OffResponseParser`: Extract an toàn (null safety).
+- [x] **1.3.3.** `OffProductData` record: barcode, name, brand, nutriscoreGrade, novaGroup, additivesTags, etc.
+- [ ] **1.3.4.** Resilience4j `@CircuitBreaker` + `@Retry` annotations (CHƯA — đang dùng try/catch thủ công).
 
 ---
 
-## 🟢 Sprint 2: The Brain (Deterministic Scoring & API `/v1/products/{barcode}`)
-**Mục tiêu:** Hoàn thiện luồng lấy sản phẩm và chấm điểm toán học, quyết định màu sắc. Đóng gói thành API chuẩn.
+## ✅ Sprint 2: Scoring Engine & Core API (HOÀN THÀNH)
 
-### Task 2.1: Bộ chấm điểm Độc lập (Pure Logic) (Spec 03)
-- [ ] **2.1.1.** Tạo Class `ScoringEngineService` thuần Java (Không gọi CSDL, không autowired Repo).
-- [ ] **2.1.2.** Viết hàm `CalculateResult calculateScore(OffProduct payload, UserPreferences userPrefs)`.
-- [ ] **2.1.3.** Triển khai logic tính N_Nutri (40%), N_Nova (40%), N_Additives (20%).
-- [ ] **2.1.4.** Triển khai hàm Override 1 (Blacklist Additives) và Override 2 (Allergy Conflict) để ép điểm `<40` và màu `RED`.
-- [ ] **2.1.5.** Viết Unit Test `ScoringEngineServiceTest` coverage 100%. Assert chắc chắn nếu chứa hạt Peanut thì auto màu RED.
+### Task 2.1: Deterministic Scoring Engine
+- [x] **2.1.1.** `ScoringEngineService` — Pure Java, zero I/O.
+- [x] **2.1.2.** Formula: `(N_Nutri*0.4) + (N_Nova*0.4) + (N_Additives*0.2)`.
+- [x] **2.1.3.** Override O1 (Blacklist Additives), O2 (Allergy Conflict), O3 (Missing Data).
+- [x] **2.1.4.** `AdditiveRiskRegistry` — phân loại HIGH/MEDIUM/LOW.
+- [ ] **2.1.5.** Unit Test `ScoringEngineServiceTest` coverage 100% (CHƯA).
 
-### Task 2.2: Lắp ráp API Gateway `/v1/products/{barcode}`
-- [ ] **2.2.1.** Tạo DTO `ProductEvaluationResponse` đúng chuẩn Swagger Spec 06.
-- [ ] **2.2.2.** Tạo `ProductApplicationService` orchestrator method với LUỒNG CHUẨN như sau:
-  - [ ] *Bước 1:* Gọi DB kiểm tra cache (`ProductRepository.findById`). Nếu có -> Check thời hạn (TTL < 3 tháng) -> Return luôn (Cache Hit).
-  - [ ] *Bước 2:* Nếu Cache Miss -> **Mở Network call tới OFF**. (⚠️ Không bọc hàm gọi OFF trong `@Transactional` để tránh giam giữ connection pool).
-  - [ ] *Bước 3:* Nhận response OFF -> Xử lý lỗi (Nếu 404 throw Custom Exception).
-  - [ ] *Bước 4:* Truyền payload vào `ScoringEngineService` để lấy màu sắc và điểm số.
-  - [ ] *Bước 5:* Mở transaction DB mới (`@Transactional(propagation = Propagation.REQUIRES_NEW)`) lưu thông tin Product cùng với điểm số vào database. Chú ý set `ai_summary_cache` = null.
-- [ ] **2.2.3.** Tạo `GlobalExceptionHandler` bắt lỗi văng từ tầng dưới và trả ra cấu trúc `StandardError` có `trace_id`.
+### Task 2.2: API Gateway `/v1/products/{barcode}`
+- [x] **2.2.1.** `ProductEvaluationResponse` — đầy đủ fields (rating, score, aiSummary, category, categoryWarning, riskFactors).
+- [x] **2.2.2.** `ProductApplicationService` orchestrator 7 bước.
+- [x] **2.2.3.** `ProductPersistService` — tách `@Transactional` operations (Guardrail Rule 6).
+- [x] **2.2.4.** `GlobalExceptionHandler` — StandardError response.
 
-### Task 2.3: API Quản lý Người dùng `/v1/users/me/preferences`
-- [ ] **2.3.1.** Tạo DTO `UpdatePreferencesRequest` (Chứa array `allergies` và string `diet`).
-- [ ] **2.3.2.** Implement Cập nhật DB (Toàn vẹn Transaction, Hibernate Lifecycle).
-
-**💡 Definition of Done (DoD - Sprint 2):**
-- API `/v1/products/{barcode}` chạy thành công. Phản hồi < 200ms với Data local và < 2.5s với Data phải qua OFF. Có đủ màu sắc và Overrides.
+### Task 2.3: User Preferences
+- [x] **2.3.1.** `UpdatePreferencesRequest` (allergies + diet).
+- [x] **2.3.2.** `UserService.updatePreferences()` — entity load/save (Hibernate JSONB mapping).
 
 ---
 
-## 🤖 Sprint 3: AI Inference & Edge APIs
-**Mục tiêu:** Tích hợp bộ não AI sinh tóm tắt (<50 từ) dạng JSON an toàn, giải quyết bài toán Rate Limit.
+## ✅ Sprint 3: AI + Auth + Premium Features (HOÀN THÀNH)
 
-### Task 3.1: Gọi Gemini 1.5 Flash (Spec 04)
-- [ ] **3.1.1.** Cài đặt SDK sinh text (vd `spring-ai-vertex-ai-gemini-spring-boot-starter` hoặc gọi HTTP thủ công).
-- [ ] **3.1.2.** Triển khai `AiAnalysisClientService`. Gói gọn System Prompt (Ép JSON mode rủi ro).
-- [ ] **3.1.3.** Cài đặt Timeout Exception = `2000ms` tại Client. Cài đặt `@Retry` Max 1 turn nếu HTTP timeout, quá thì ném `AiTimeoutException`. Fallback trả về Empty Object không nổ App.
+### Task 3.1: Gemini 1.5 Flash Integration
+- [x] **3.1.1.** `GeminiClient` — HTTP client gọi Gemini API.
+- [x] **3.1.2.** Category-specific prompt templates (FOOD/TOY/BEAUTY/FASHION).
+- [x] **3.1.3.** `AiAnalysisResult` record (aiSummary, detectedAllergies, riskIngredients).
+- [x] **3.1.4.** AI Cache: SHA-256 hash đối chiếu `ai_inputs_hash`.
+- [x] **3.1.5.** Timeout 2000ms → fallback empty AI summary.
 
-### Task 3.2: Ghép AI vào Luồng Product API gốc (Trí mạng)
-- [ ] **3.2.1.** Cập nhật Orchestrator `ProductApplicationService`. Đứng sau *Bước 5* của Task 2.2.2.
-- [ ] **3.2.2.** So khớp `SHA256(ingredients_text)`. Nếu trùng rớt vào `ai_summary_cache` -> Lấy luôn Tóm tắt DB (AI Cache Hit).
-- [ ] **3.2.3.** Nếu AI Cache Miss -> Gọi `AiAnalysisClientService`. (⚠️ Lại một lần nữa: Hàm gọi GPT KHÔNG được bọc trong `@Transactional`).
-- [ ] **3.2.4.** Lấy được `ai_summary` -> Mở Update Transaction ghi đè vào DB -> Trả về JSON cho Mobile. (Tổng thời gian < 2 giây rưỡi).
+### Task 3.2: Authentication
+- [x] **3.2.1.** `AuthController` — `/v1/auth/register`, `/v1/auth/login`.
+- [x] **3.2.2.** `AuthService` — BCrypt password hashing, JWT generation.
+- [x] **3.2.3.** `JwtUtil` — token generation/validation.
+- [x] **3.2.4.** `RegisterRequest`, `LoginRequest`, `AuthResponse` DTOs.
 
-### Task 3.3: API Đóng góp & Async / Rate Limit
-- [ ] **3.3.1.** Tạo API POST `/v1/contribute` nhận multipart file. Upload thẳng Google Cloud Storage. Trả HTTP 202.
-- [ ] **3.3.2.** Áp dụng `Bucket4j` trên tầng Interceptor (Rate limit 20 req/minute/IP) vào endpoint Analyse của Product API để chống phá hoại ngân sách Gemini.
+### Task 3.3: Subscription Tier Gating
+- [x] **3.3.1.** `SubscriptionTier` enum (FREE/PREMIUM).
+- [x] **3.3.2.** Tier gating trong `ProductApplicationService` — FREE users không có personal overrides.
+- [x] **3.3.3.** `PremiumRequiredException` + 403 response.
 
-**💡 Definition of Done (DoD - Sprint 3):**
-- Gọi Barcode API ra Full Body: Data chuẩn xác Deterministic + AI_Summary tự nhiên (< 50 từ). Nếu Model sập/quá tải, API vẫn trả 200 OK với màu sắc xanh đỏ vàng đúng, chỉ để trống field `ai_summary`.
+### Task 3.4: Safety Profile Wizard (Premium)
+- [x] **3.4.1.** `SafetyProfileController` — PUT/GET `/v1/users/me/safety-profile`.
+- [x] **3.4.2.** `SafetyProfileService` — data sanitization, persistence.
+- [x] **3.4.3.** `SaveSafetyProfileRequest` — 8-screen validation (targets, allergies, skin, health, diet).
+- [x] **3.4.4.** `SafetyProfileResponse` — fromMap factory method.
+- [x] **3.4.5.** Child/Pregnancy conditional branches.
+
+### Task 3.5: Multi-Category Detection
+- [x] **3.5.1.** `ProductCategory` enum (FOOD/TOY/BEAUTY/FASHION/GENERAL).
+- [x] **3.5.2.** `ProductCategoryDetector` — phân loại từ `categories_tags`.
+- [x] **3.5.3.** Category-specific warnings trong response.
+
+### Task 3.6: Contribution API
+- [x] **3.6.1.** `ContributionController` — `POST /v1/contribute` multipart upload → 202.
+- [ ] **3.6.2.** GCS Upload + Pub/Sub trigger (CHƯA — stub only).
 
 ---
 
-## 🚀 Sprint 4: CI/CD & Production Deployment
-**Mục tiêu:** Đóng gói, triển khai, theo dõi.
+## 🔲 Sprint 4: Production Hardening (CHƯA TRIỂN KHAI)
 
-### Task 4.1: Dockerization
-- [ ] **4.1.1.** Viết `Dockerfile` base image `eclipse-temurin:21-jre-alpine`. Build theo cơ chế Multi-stage hoặc Spring Boot Native Image.
-- [ ] **4.1.2.** Viết `docker-compose.yml` để mock test môi trường DB local giả lập Cloud SQL.
-### Task 4.2: CI/CD Pipeline
-- [ ] **4.2.1.** Khởi tạo file `.github/workflows/deploy.yml`: Các bước build Maven, chạy Checkstyle, chạy Tests (Chứa hàm check N+1 sql assert). Push tệp image lên Google Artifact Registry.
-### Task 4.3: Deploy GCP
-- [ ] **4.3.1.** Cấu hình App Deploy lên **Google Cloud Run**, gắn network giao tiếp internal với **Cloud SQL PostgreSQL**. Cấu hình Secret Manager cho các giá trị nhạy cảm (JWT Secret, API Key OFF, Gemini Key, DB Password).
+### Task 4.1: Resilience & Rate Limiting
+- [ ] **4.1.1.** Tích hợp Resilience4j `@CircuitBreaker` + `@Retry` cho OFF Client.
+- [ ] **4.1.2.** Áp dụng `Bucket4j` Rate Limiting (20 req/min/IP).
+- [ ] **4.1.3.** Caffeine Local Cache cho sản phẩm hot.
+
+### Task 4.2: Testing
+- [ ] **4.2.1.** Unit Test `ScoringEngineServiceTest` — 100% coverage.
+- [ ] **4.2.2.** Integration Test — kiểm tra N+1 query.
+- [ ] **4.2.3.** API Test — test tất cả 7 endpoints.
+
+### Task 4.3: Subscription Management
+- [ ] **4.3.1.** API upgrade FREE → PREMIUM (endpoint mới).
+- [ ] **4.3.2.** Scan History API — GET endpoint cho mobile.
+
+### Task 4.4: Docker & CI/CD
+- [x] **4.4.1.** `Dockerfile` (eclipse-temurin:21-jre-alpine, multi-stage build).
+- [x] **4.4.2.** `docker-compose.yml` (PostgreSQL + Backend).
+- [ ] **4.4.3.** `.github/workflows/deploy.yml` — CI/CD pipeline.
+
+### Task 4.5: Deploy GCP
+- [ ] **4.5.1.** Cloud Run deployment + Cloud SQL config.
+- [ ] **4.5.2.** Secret Manager (JWT key, API keys, DB password).
+- [ ] **4.5.3.** Monitoring + Alerting setup.

@@ -1,85 +1,72 @@
-# AI Integration Contract V2 (LLM Specs)
+# AI Integration Contract V2 (Cập nhật — Multi-category + PREMIUM Personalization)
 
-Tài liệu này xác định giao kèo bắt buộc bằng mã tĩnh cho việc tích hợp AI (Gemini 1.5 Flash). Mục đích là khóa chặt rủi ro lỗi định dạng JSON (JSON parsing error) và chống hiện tượng AI tự cấu trúc lại màu sắc đánh giá của hệ thống Scoring Determinist.
+Tài liệu xác định giao kèo bắt buộc cho việc tích hợp AI (Gemini 1.5 Flash / 2.5 Flash). Mở rộng với prompt routing theo danh mục sản phẩm và ngữ cảnh cá nhân PREMIUM.
 
-## 1. Responsibility Boundary (Ranh giới Kỹ thuật)
+## 1. Responsibility Boundary
 AI **ĐƯỢC PHÉP**:
-1. Đọc danh sách thành phần (ingredients_text).
-2. Tóm tắt các rủi ro dài hạn, ngắn hạn (Ví dụ: "Hàm lượng đường quá cao, chứa chất bảo quản nhân tạo").
-3. Chỉ ra thành phần cụ thể.
+1. Đọc danh sách thành phần (ingredients_text / materials).
+2. Tóm tắt rủi ro < 50 từ tiếng Việt.
+3. Chỉ ra thành phần cụ thể đáng lo ngại.
+4. Phát hiện dị ứng chéo (cross-contamination) cho PREMIUM users.
 
 AI **TUYỆT ĐỐI KHÔNG ĐƯỢC PHÉP**:
-1. Cấp thẻ màu, điểm số hoặc đánh giá mức độ rủi ro (Nghiêm cấm output từ "Sản phẩm này là Đỏ/Xanh", "Đây là sản phẩm tệ").
-2. Viết câu dài lê thê giải thích chung chung về dinh dưỡng. Tổng số từ của Summary không được quá 50 từ tiếng Việt.
+1. Cấp thẻ màu, điểm số hoặc đánh giá mức độ rủi ro.
+2. Viết câu dài hơn 50 từ tiếng Việt.
 
-## 2. Prompt Interface & Template
-```text
-Role: Bạn là chuyên gia dinh dưỡng lâm sàng API (Không phải là chatbot).
-Nhiệm vụ: Phân tích thành phần thực phẩm và tóm tắt rủi ro sức khỏe bằng ngữ cảnh tiếng Việt ngắn gọn, trực diện, dễ đọc (< 50 từ). Bạn KHÔNG quyết định mức độ an toàn (Xanh/Đỏ/Vàng). Chỉ trích xuất sự kiện.
+## 2. Multi-Category Prompt Routing
+`GeminiClient.buildPrompt()` chọn template dựa trên `ProductCategory`:
 
-Đầu vào (Input Context):
-- product_name: {product_name}
-- macro_sugar_100g: {sugar_100g}
-- macro_salt_100g:  {salt_100g}
-- ingredients_text: "{ingredients_text}"
-- user_allergies_list: {allergies_json}
+| Category | Prompt Template | Chuyên gia | Focus |
+|----------|----------------|-----------|-------|
+| FOOD | `buildFoodPrompt()` | Dinh dưỡng lâm sàng | Sugar, salt, additives, dị ứng |
+| TOY | `buildToyPrompt()` | An toàn sản phẩm trẻ em | Giới hạn tuổi, nguy cơ nuốt, vật liệu |
+| BEAUTY | `buildBeautyPrompt()` | An toàn mỹ phẩm | Paraben, SLS/SLES, formaldehyde, hương liệu |
+| FASHION | `buildFashionPrompt()` | An toàn dệt may | Azo dye, hóa chất nhuộm, phù hợp da nhạy cảm |
+| GENERAL | `buildGeneralPrompt()` | Phân tích chung | Thông tin tổng quát |
 
-Ràng buộc (Rules):
-1. KHÔNG thêm bất kỳ text nào ngoài JSON (No Markdown ```json wrappers).
-2. Câu văn ở thuộc tính `ai_summary` phải ngắn gọn, dễ hiểu ở góc độ siêu thị (Tối đa 50 từ). Cảnh báo trực diện, không dài dòng.
-3. Nếu "ingredients_text" rỗng hoặc quá ít, trả summary: "Không đủ thông tin để tóm tắt."
-4. Liệt kê các thành phần dị ứng tìm thấy vào thuộc tính "detected_allergies" dựa rên user_allergies_list.
+## 3. PREMIUM Personalization Context
+Khi user là PREMIUM và đã hoàn thành Safety Profile wizard, hệ thống append `buildPersonalContext()` vào prompt:
+- Đối tượng sử dụng (SELF, CHILD, PREGNANT)
+- Profile trẻ em: độ tuổi, dị ứng, mức phản ứng
+- Profile thai kỳ: giai đoạn
+- Dị ứng thực phẩm + dị ứng hiếm/ẩn
+- Nhạy cảm mỹ phẩm + loại da (cho BEAUTY)
+- Tình trạng sức khỏe + chế độ ăn
+- Mức dị ứng (MILD/MODERATE/SEVERE)
+- Yêu cầu bổ sung: cross-contamination, tên gọi ẩn (casein = sữa)
 
-Đầu Ra (Output Format):
-JSON ONLY theo Schema dưới đây.
-```
-
-## 3. Strict JSON Target Schema (Hợp đồng Trả Về)
-Phía Backend HTTP Client sẽ tiến hành Deserialize phản hồi của AI theo Class/Record chuẩn xác nhất định bên dưới:
-
+## 4. Strict JSON Target Schema
 ```json
 {
-  "type": "object",
-  "properties": {
-    "ai_summary": {
-      "type": "string",
-      "description": "Tóm tắt rủi ro < 50 chữ."
-    },
-    "detected_allergies": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Mảng chứa danh sách chất gây dị ứng phát hiện được từ Input."
-    },
-    "risk_ingredients": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "Mảng danh mục các chất phụ gia/thành phần rủi ro (Ví dụ: 'Siro ngô', 'E171'). Giới hạn 5 phần tử."
-    }
-  },
-  "required": ["ai_summary", "detected_allergies", "risk_ingredients"],
-  "additionalProperties": false
+  "ai_summary": "Tóm tắt rủi ro < 50 chữ.",
+  "detected_allergies": ["allergen1", "allergen2"],
+  "risk_ingredients": ["E171", "Siro ngô"]
 }
 ```
+- `ai_summary` (string, required): < 50 từ tiếng Việt.
+- `detected_allergies` (array, required): Chất gây dị ứng phát hiện. Rỗng nếu không có.
+- `risk_ingredients` (array, required): Thành phần rủi ro. Tối đa 5.
 
-## 4. Timeout policy & Error Mitigation
-- API Call HTTP Client timeout sẽ được set cứng bằng `2000 miliseconds (2 giây)`.
-- Nếu AI response trễ hơn 2 giây -> Hệ thống sinh ngoại lệ `AITimeoutException`. Xử lý block try/catch này bằng hàm dự phòng: Trả về Object AI trắng (Fallback).
+## 5. Timeout & Fallback
+- **Connect Timeout:** `5000ms`. **Read Timeout:** `12000ms`.
+- **Fallback** khi timeout hoặc lỗi:
 ```java
-// Giả mã (Pseudo-code) cho Backend
-public AiResult fetchAiSummary(Product input) {
-    try {
-        return aiClient.call(input, Duration.ofMillis(2000));
-    } catch (TimeoutException | JsonParseException e) {
-        log.warn("AI Call failed for barcode {}", input.getBarcode(), e);
-         // Fallback Response
-        return new AiResult(
-           "Dữ liệu đang được phân tích bởi AI (Quá tải).",
-           List.of(), List.of()
-        );
-    }
-}
+new AiAnalysisResult(
+    "Dữ liệu đang được phân tích. Vui lòng thử lại sau.",
+    Collections.emptyList(), Collections.emptyList()
+);
 ```
+- Response cleaning: Strip ````json` wrappers trước khi deserialize.
 
-## 5. Token Limit Optimization
-Vì OpenFoodFacts Payload rất lớn, để tối ưu **Cost-per-Scan** của Gemini, phần backend chỉ inject các trường cần thiết. Bỏ hết ảnh, metadata, location tag khỏi prompt.
-Cắt chuỗi `ingredients_text` nếu dài hơn 1500 ký tự (Chắn rủi ro spam token overflow).
+## 6. Token Limit Optimization
+- Cắt `ingredients_text` tại `1500` ký tự (`app.ai.max-ingredients-length`).
+- Chỉ inject trường cần thiết, bỏ hết ảnh, metadata, location.
+
+## 7. Configuration
+```yaml
+app:
+  ai:
+    gemini-key: ${GEMINI_API_KEY}
+    gemini-url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+    max-ingredients-length: 1500
+```

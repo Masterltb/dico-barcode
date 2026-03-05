@@ -1,56 +1,85 @@
-# DICO Scan - AI Agent Memory & Context Guide (V2)
+# DICO Scan - AI Agent Memory & Context Guide (V2 — Cập nhật)
 
 > **[CRITICAL SYSTEM PROMPT INSTRUCTION]** 
-> *Tài liệu này là bản nén (compressed context) của toàn bộ dự án gốc. Thay vì bắt AI nhồi nhét 10 files tài liệu dài dòng gây lãng phí Token, hãy chỉ bám vào `memory.md` này để nắm toàn bộ ngữ cảnh trước khi code. Nếu cần detail phần nào mới gọi tool search file đó.*
+> *Tài liệu này là bản nén toàn bộ dự án. Bám vào `memory.md` để nắm context trước khi code.*
 
 ---
 
 ## 1. Project Context & Constraints
-*   **Project Context:** DICO Scan MVP (Web/Mobile App). Phân tích mã vạch thực phẩm > Tính điểm (0-100) > Cấp màu (Xanh/Vàng/Đỏ) > Sinh Tóm tắt (AI).
-*   **Tech Stack:** Java 21, Spring Boot 3, Cloud SQL (PostgreSQL 16), Cloud Run, Gemini 1.5 Flash.
-*   **DB Rules:** 
-    *   Bảng `users` (id UUID, email, preferences JSONB).
-    *   Bảng `products` (barcode PK, raw_payload JSONB, determin_score, rating_color, ai_summary_cache).
-    *   Bảng `scan_history` (Partitioning theo ngày).
+*   **Project:** DICO Scan MVP. Quét barcode > Phân loại danh mục > Tính điểm (0-100) > Cấp màu (Xanh/Vàng/Đỏ) > AI Tóm tắt.
+*   **Tech Stack:** Java 21, Spring Boot 3, PostgreSQL 16 (Cloud SQL), Cloud Run, Gemini 1.5 Flash.
+*   **Subscription Tiers:** FREE (generic scan) / PREMIUM (personalization + safety profile).
+*   **Product Categories:** FOOD / TOY / BEAUTY / FASHION / GENERAL.
+
+*   **DB Tables:**
+    *   `users` (id UUID, email, password_hash, display_name, subscription_tier, preferences JSONB, profile_data JSONB, safety_profile JSONB, profile_completed).
+    *   `products` (barcode PK, name, brand, image_url, off_payload JSONB, determin_score, rating_color, confidence_score, ai_summary_cache, ai_inputs_hash, category).
+    *   `scan_history` (id UUID, user_id FK, barcode FK, scanned_at, snapshot_color).
 
 *   **[NON-NEGOTIABLE GUARDRAILS]:**
-    1.  **NO N+1 Query:** Cấm dùng Vòng lặp lấy relations. Bắt buộc `#DTO Projection` (Record) hoặc `@EntityGraph`.
-    2.  **Transactions & Network:** Tuyệt đối không bọc `@Transactional` ngoại vi khi gọi API chậm (OpenFoodFacts / Gemini) để chống sập Connection Pool.
-    3.  **Resilience:** Mọi Rest Client gọi ra ngoài phải có `Retry` (Fall config) và `Timeout` (Max 2s cho AI, 3s cho Data).
-    4.  **AI Usage:** Gemini AI CHỈ sinh text tóm tắt (< 50 từ). KHÔNG cho điểm, KHÔNG quyết định sinh màu Xanh/ Đỏ. Màu do Toán quyết định.
+    1.  **NO N+1 Query:** Cấm loop lazy loading. Bắt buộc DTO Projection hoặc `@EntityGraph`.
+    2.  **Transactions & Network:** Tuyệt đối không bọc `@Transactional` khi gọi OFF/Gemini → chống sập Connection Pool.
+    3.  **Resilience:** Mọi REST Client phải có Retry + Timeout (AI 2s, OFF 3s).
+    4.  **AI Usage:** Gemini CHỈ sinh text tóm tắt < 50 từ. KHÔNG cho điểm, KHÔNG quyết định màu.
+    5.  **Tier Gating:** FREE users = generic scoring. PREMIUM users = personal allergies + safety profile.
 
 ---
 
-## 2. API & Data Flow (The Blueprint)
+## 2. API Endpoints (7 total)
 
-### Core Workflow: /v1/products/{barcode} (The Entry Point)
-Khi có Request quét mã vạch xảy ra, quy trình 5 bước trong Orchestrator:
-1.  **DB Check:** Tìm barcode trong DB. Nếu có & cache còn sống (< 3 tháng) => Mở bước 5.
-2.  **Fetch (Network):** Quét OpenFoodFacts. Nếu không có => Ném lỗi `404 ProductNotFound`. Mobile tự gọi /contribute upload ảnh.
-3.  **Deterministic Engine:** Vận hành Pure Math Java.
-    *   `Score = N_Nutri (40) + N_Nova (40) + N_Additive (20)`. (Null Data = 50 điểm phạt).
-    *   `GREEN (>70)`, `YELLOW (40-69)`, `RED (<40)`.
-    *   *Hard Override O1/O2:* Ném vào List `Allergies` của User. Nếu khớp nguyên liệu => Ép ĐỎ `<10 điểm`.
-4.  **AI Engine (Network Focus):**
-    *   Input: `ingredients_text`, `salt`, `sugar`, `user_allergies`. Hash chuỗi này.
-    *   Check Hash DB, có thì bốc luôn (AI Cache). Không có mới gõ lệnh cựu Gọi Gemini. Timeout 2000ms => Fallback AI Summary = rỗng.
-5.  **Save & Response:** Update Record `products` => Push DTO `ProductEvaluationResponse` cho Mobile.
+| Method | Endpoint | Auth | Tier | Controller |
+|--------|----------|------|------|-----------|
+| POST | `/v1/auth/register` | Public | - | AuthController |
+| POST | `/v1/auth/login` | Public | - | AuthController |
+| GET | `/v1/products/{barcode}` | Optional X-User-Id | FREE/PREMIUM | ProductController |
+| PUT | `/v1/users/me/preferences` | Required | PREMIUM | UserController |
+| PUT | `/v1/users/me/safety-profile` | Required | PREMIUM | SafetyProfileController |
+| GET | `/v1/users/me/safety-profile` | Required | - | SafetyProfileController |
+| POST | `/v1/contribute` | Optional | - | ContributionController |
 
 ---
 
-## 3. The Implementation Roadmap (Tick-box List cho Agent)
+## 3. Core Workflow: /v1/products/{barcode}
 
-Trong quá trình generate code, bạn **bắt buộc phải chia Tasks / Tool Calls** theo đúng Roadmap sau. Không nhảy cóc.
-
-*   **Sprint 1:** Build DB (Flyway), Xây Entity 1 chiều (Unidirectional), Viết Component `OffClient` gọi OpenFoodFacts (Resilience4j).
-*   **Sprint 2:** Build API Core. Viết Service Toán Học (Deterministic) chấm điểm, xử Overrides dị ứng. Dọn dẹp Exception Catcher mượt mà.
-*   **Sprint 3:** Cài API AI Gemini (Prompt: Trả Strictly JSON, Tóm tắt ngắn). Gắn vào luồng API chính với Timeout chuẩn. Viết API upload ảnh.
+Orchestrator (`ProductApplicationService`) 7 bước:
+1.  **User + Tier:** Load user → xác định FREE/PREMIUM → extract allergies.
+2.  **DB Cache:** Tìm barcode trong DB. Fresh (< 90 ngày) → trả ngay.
+3.  **OFF Fetch:** Cache miss → gọi OpenFoodFacts. 404 → `ProductNotFoundException`.
+4.  **Category Detection:** `ProductCategoryDetector` phân loại từ `categories_tags`.
+5.  **Deterministic Scoring:** `Score = N_Nutri(40) + N_Nova(40) + N_Additive(20)`.
+    *   Override O1: Blacklist additive → RED (score ≤ 39).
+    *   Override O2: Allergy conflict → RED (score ≤ 10).
+    *   Override O3: Missing data → UNKNOWN.
+6.  **Persist:** `ProductPersistService.saveProduct()` (separate `@Transactional`).
+7.  **AI Layer:** Hash check → AI cache hit hoặc gọi Gemini → timeout 2000ms → fallback.
 
 ---
 
-## 4. Troubleshooting (Khi Agent Bị Kẹt)
-1.  **"Hibernate N+1 Query Error" ->** Dừng code, đổi hết Response của Endpoint GET về Java `Record` view trực tiếp, gắn `@Query` bốc đúng 1 lệnh SELECT.
-2.  **"Connection Timeout / Cloud SQL Exhausted" ->** Tách cái hàm `productService.getAI(...)` vút xuống cuối, kéo `@Transactional(REQUIRES_NEW)` chỉ bao block lưu DB, nhả block gọi Mạng.
-3.  **"JSON Parse Exception / LLM Yapping" ->** Check lại System Prompt của Gemini, bổ sung câu thần chú "DO NOT WRAP IN ```json. RETURN ONLY RAW JSON."
+## 4. Service Map
 
-*Hãy nhớ Context này, giữ Response luôn gọn gàng và bám sát kiến trúc Serverless Micro-App.*
+| Service | Responsibility |
+|---------|---------------|
+| `ProductApplicationService` | Orchestrator 7 bước |
+| `ScoringEngineService` | Pure Java math scoring |
+| `AdditiveRiskRegistry` | HIGH/MEDIUM/LOW additive classification |
+| `ProductCategoryDetector` | FOOD/TOY/BEAUTY/FASHION/GENERAL detection |
+| `ProductPersistService` | DB save với `@Transactional` |
+| `GeminiClient` | AI call + category prompt templates |
+| `OpenFoodFactsClient` | OFF API proxy + timeout |
+| `SafetyProfileService` | Questionnaire CRUD + sanitization |
+| `AuthService` | Register/Login + JWT + BCrypt |
+| `UserService` | Preferences update |
+
+---
+
+## 5. Sprint Status
+- **Sprint 1-3:** ✅ HOÀN THÀNH (DB, Entities, OFF, Scoring, AI, Auth, Tier, Safety Profile, Categories).
+- **Sprint 4:** 🔲 CHƯA (Resilience4j, Bucket4j, Tests, CI/CD, GCP Deploy).
+
+---
+
+## 6. Troubleshooting
+1.  **"N+1 Query"** → Đổi response về Java Record, gắn `@Query` bốc 1 SELECT.
+2.  **"Connection Pool Exhausted"** → Tách `@Transactional` khỏi hàm gọi OFF/Gemini.
+3.  **"JSON Parse Exception"** → Check System Prompt Gemini, thêm "RETURN ONLY RAW JSON".
+4.  **"PremiumRequiredException"** → User là FREE, endpoint yêu cầu PREMIUM.

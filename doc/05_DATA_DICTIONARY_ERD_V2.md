@@ -1,33 +1,39 @@
-# Lược đồ Dữ liệu và Constraints (PostgreSQL V2)
+# Lược đồ Dữ liệu và Constraints (PostgreSQL V2 — Cập nhật)
 
 Tài liệu thiết kế cấu trúc CSDL mức vật lý phục vụ khả năng chịu tải cao và tìm kiếm linh hoạt cho DICO Scan. DB sử dụng PostgreSQL 16+.
 
-## 1. Sơ đồ Thực thể (ERD) - Cốt lõi
+## 1. Sơ đồ Thực thể (ERD)
 ```mermaid
 erDiagram
     users ||--o{ scan_history : "thực hiện"
-    users ||--o{ user_favorites : "lập danh sách"
     products ||--o{ scan_history : "được quét"
-    products ||--o{ user_favorites : "thuộc danh mục"
 
     users {
         uuid id PK
-        varchar(255) email "UNIQUE"
-        varchar(100) display_name
-        jsonb preferences "Bao gồm mảng dị ứng, diet"
+        varchar_255 email "UNIQUE, NOT NULL"
+        varchar_255 password_hash "BCrypt hash"
+        varchar_100 display_name
+        varchar_20 subscription_tier "FREE | PREMIUM, default FREE"
+        jsonb preferences "allergies + diet"
+        jsonb profile_data "Extended profile (Premium)"
+        jsonb safety_profile "Questionnaire wizard data (Premium)"
+        boolean profile_completed "default false"
         timestamptz created_at
         timestamptz updated_at
     }
 
     products {
-        varchar(13) barcode PK "EAN/UPC"
-        varchar(255) name
-        varchar(255) brand
-        jsonb off_payload "Cache data thô từ OpenFoodFacts API"
-        int2 determin_score "Điểm tính toán (0-100)"
-        varchar(20) rating_color "GREEN, YELLOW, RED, UNKNOWN"
-        text ai_summary_cache "Tóm tắt từ AI. NULL = Chưa chạy AI"
-        varchar(64) ai_inputs_hash "SHA256 hash của inputs để biết khi nào cần tính lại AI"
+        varchar_14 barcode PK "EAN-8 to EAN-14"
+        varchar_255 name
+        varchar_255 brand
+        text image_url "Product image from OFF"
+        jsonb off_payload "Cache data thô từ OFF API"
+        int2 determin_score "0-100, NULL nếu UNKNOWN"
+        varchar_10 rating_color "GREEN | YELLOW | RED | UNKNOWN"
+        float confidence_score "0.0-1.0, default 1.0"
+        text ai_summary_cache "Tóm tắt AI, NULL = chưa chạy"
+        varchar_64 ai_inputs_hash "SHA-256 hash AI inputs"
+        varchar_30 category "FOOD | TOY | BEAUTY | FASHION | GENERAL, default FOOD"
         timestamptz created_at
         timestamptz updated_at
     }
@@ -35,46 +41,58 @@ erDiagram
     scan_history {
         uuid id PK
         uuid user_id FK
-        varchar(13) barcode FK
+        varchar_14 barcode FK
         timestamptz scanned_at
-        varchar(20) snapshot_color "Lưu lại màu tại thời điểm quét"
+        varchar_10 snapshot_color "Lưu lại màu tại thời điểm quét"
     }
 ```
 
 ## 2. Table Schemas, Constraints & Indexes
 
 ### Bảng `users`
-Bảng lưu trữ người dùng và cấu hình cá nhân.
+Bảng lưu trữ người dùng, xác thực, cấu hình cá nhân và hồ sơ an toàn.
 - **Constraints**:
-  - `email` phải duy nhất. (Unique Constraint).
-  - Khóa chính sinh mặc định (UUID v4 mặc định DB).
+  - `email` phải duy nhất (Unique Constraint).
+  - `subscription_tier` mặc định `FREE`, chỉ chấp nhận `FREE` hoặc `PREMIUM`.
+  - `profile_completed` mặc định `false`.
+  - Khóa chính UUID v4 sinh tự động.
 - **Indexes**:
   - B-tree Index trên `email`.
   - **GIN Index trên trường `preferences`**: Hỗ trợ tìm kiếm siêu tốc trên JSON `user.preferences.allergies`.
   - `CREATE INDEX idx_users_prefs ON users USING GIN (preferences);`
 
 ### Bảng `products`
-Bảng thiết yếu nhất, đóng vai trò như Product Catalog + Product Cache phân tích.
+Bảng Product Catalog + Product Cache phân tích đa danh mục.
 - **Constraints**:
-  - `barcode`: Khóa chính (Primary Key).
-  - `rating_color`: `CHECK (rating_color IN ('GREEN', 'YELLOW', 'RED', 'UNKNOWN'))` - Bắt buộc đúng Enumeration.
-  - `determin_score`: `CHECK (determin_score >= 0 AND determin_score <= 100)`
+  - `barcode`: Khóa chính (Primary Key), tối đa 14 ký tự.
+  - `rating_color`: `CHECK (rating_color IN ('GREEN', 'YELLOW', 'RED', 'UNKNOWN'))`.
+  - `determin_score`: `CHECK (determin_score >= 0 AND determin_score <= 100)`.
+  - `confidence_score`: mặc định `1.0`, range `[0.0, 1.0]`.
+  - `category`: mặc định `'FOOD'`.
 - **Indexes**:
-  - B-tree Index trên `updated_at`: Phục vụ truy vấn dọn dẹp bộ nhớ (Cache eviction policy cho các sản phẩm chưa ai quét hơn 3 tháng).
-  - GIN Index (tùy chọn trong phase 2) trên `off_payload`: Tìm kiếm full-text search theo tên sản phẩm thuần túy.
-  - Phím tìm Hash: Index trên `ai_inputs_hash` để AI caching resolver.
+  - B-tree Index trên `updated_at DESC`: Phục vụ cache eviction (sản phẩm > 3 tháng).
+  - B-tree Index trên `ai_inputs_hash`: AI caching resolver.
+  - GIN Index (tùy chọn Phase 2) trên `off_payload`: Full-text search.
 
 ### Bảng `scan_history`
-Lưu trữ log quét của người dùng.
-- **Thiết kế mở rộng (Scaling design)**:
-  - Bảng này lớn rất nhanh (Data-heavy). Ở góc độ vật lý PostgreSQL, thiết lập **Table Partitioning theo thời gian** (Range Partitioning by Month trên trường `scanned_at`).
-  - Lợi ích: Khi xóa logs > 6 tháng, chỉ cần `DROP PARTITION`, không lock table.
+Lưu trữ log quét của người dùng với snapshot pattern.
+- **Thiết kế mở rộng**:
+  - Table Partitioning theo thời gian (Range Partitioning by Month trên `scanned_at`).
+  - Khi xóa logs > 6 tháng, chỉ cần `DROP PARTITION`.
 - **Constraints**:
-  - `user_id` map tới UUID người dùng cụ thể. `barcode` map tới product_code cụ thể. (Foreign Key Rules: ON DELETE CASCADE user, giữ nguyên product).
+  - `user_id` FK tới `users.id`. `barcode` FK tới `products.barcode`.
+  - ON DELETE CASCADE user, giữ nguyên product.
 - **Indexes**:
-  - 복합(Composite) Index: `CREATE INDEX idx_scan_hist_usr_time ON scan_history(user_id, scanned_at DESC);`. Tối ưu 100% tốc độ API fetch lịch sử quét của `MeController`.
+  - Composite Index: `CREATE INDEX idx_scan_hist_user_time ON scan_history(user_id, scanned_at DESC);`
 
-## 3. Data Retention Lifecycle
-Quy định thời gian sống của bản ghi (Xóa rác để tiết kiệm đĩa theo 14_BAO_CAO_CHI_PHI_TOI_UU.md).
-- **products**: TTL 3 tháng. Một tiến trình Background cron sẽ chạy. `DELETE FROM products WHERE updated_at < NOW() - INTERVAL '3 months'`. (Sản phẩm bị xóa sẽ được gọi lại từ OFF nếu user vô tình quét lại).
-- **scan_history**: Lịch sử chỉ lưu 6 tháng cho user tài khoản thường (BASIC). Chạy script truncate partition tự động vào mùng 1 hàng tháng.
+## 3. Flyway Migration History
+| Version | File | Nội dung |
+|---------|------|---------|
+| V1 | `V1__init_schema.sql` | 3 bảng core: `users`, `products`, `scan_history` |
+| V2 | `V2__add_subscription_and_category.sql` | Thêm `subscription_tier`, `category`, `image_url`, `confidence_score` |
+| V3 | `V3__add_safety_profile.sql` | Thêm `profile_data`, `safety_profile`, `profile_completed` |
+| V4 | `V4__add_password_hash.sql` | Thêm `password_hash` |
+
+## 4. Data Retention Lifecycle
+- **products**: TTL 3 tháng. Background cron: `DELETE FROM products WHERE updated_at < NOW() - INTERVAL '3 months'`.
+- **scan_history**: Lịch sử lưu 6 tháng. Truncate partition tự động hàng tháng.
